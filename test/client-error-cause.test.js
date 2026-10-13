@@ -36,7 +36,7 @@ async function fleet(account, { coordinator, upstreamStatus = 401 } = {}) {
 }
 
 const expired = { name: 'a', type: 'oauth', accessToken: 'dead-a', refreshToken: 'rt-a', expiresAt: Date.now() - H };
-const notOwner = 'the callback.net lock could not be taken (el pool «P» es de «maq-b», no de esta máquina («maq-a»); para renovar aquí: claude-dist proxy tomar P)';
+const notOwner = 'the callback.net lock could not be taken (this install may not renew this account right now)';
 
 test('a renewal the coordinator could not do: the client is told why, not to re-login', async () => {
   const f = await fleet(expired, {
@@ -45,7 +45,7 @@ test('a renewal the coordinator could not do: the client is told why, not to re-
   try {
     const r = await f.send();
     assert.match(r.message, /could not be renewed/);
-    assert.ok(r.message.includes('claude-dist proxy tomar P'), r.message);
+    assert.ok(r.message.includes('this install may not renew this account right now'), r.message);
     assert.doesNotMatch(r.message, /teamclaude login|\(403\)/, r.message);
   } finally { f.close(); }
 });
