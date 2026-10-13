@@ -1113,3 +1113,41 @@ test('with the sending mark on and a store without :sending, nothing is renewed 
     assert.ok(logs.some((l) => /STORE_SENDING_MARK is set but the store does not implement :sending/.test(l)), logs.join('\n'));
   });
 });
+
+test('with the sending mark on, a renewal given up after the mark tells the unlock it did not send; one that sent does not', async () => {
+  await withSendingMark(true, async () => {
+    // The mark takes long enough to eat the lease's budget: the renewal is given up
+    // after the mark and before any provider call.
+    const store = storeWithSendingMark();
+    const api = store.api;
+    store.api = async (method, path, params, opts) => {
+      if (path.endsWith(':sending')) store.tick(20_000);
+      return api(method, path, params, opts);
+    };
+    const { am, refreshed } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    await am.ensureTokenFresh(0, true).catch(() => {});
+    assert.deepEqual(refreshed, [], 'no provider call');
+    const unlocks = store.calls.filter((c) => c.path.endsWith(':unlock'));
+    assert.ok(unlocks.length >= 1);
+    assert.deepEqual(unlocks[0].params, { sent: false });
+  });
+  await withSendingMark(true, async () => {
+    const store = storeWithSendingMark();
+    const { am, refreshed } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    await am.ensureTokenFresh(0, true);
+    assert.equal(refreshed.length, 1);
+    assert.deepEqual(store.calls.filter((c) => c.path.endsWith(':unlock')).map((c) => c.params), [{}], 'a renewal that went out says nothing');
+  });
+});
+
+test('with the sending mark on, a mark the store refused also unlocks as not sent', async () => {
+  await withSendingMark(true, async () => {
+    const store = storeWithSendingMark({ refuse: true });
+    const { am } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    await am.ensureTokenFresh(0, true);
+    assert.deepEqual(store.calls.filter((c) => c.path.endsWith(':unlock')).map((c) => c.params), [{ sent: false }]);
+  });
+});

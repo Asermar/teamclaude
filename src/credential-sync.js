@@ -777,7 +777,9 @@ export class CredentialSync {
         try {
           await this.api('POST', `User/Credential/${row.id}:sending`, {});
         } catch (/** @type {any} */ err) {
-          await this._unlock(row, leaseEnd);
+          // The provider was not called: if the mark landed anyway (an answer lost in
+          // flight), the unlock says so and the store takes it back.
+          await this._unlock(row, leaseEnd, { notSent: true });
           // A store that does not know the call answers it like a missing row: a
           // configuration error (the switch is on against a store without the mark),
           // not a refusal. Still no renewal — without the mark it does not go out —
@@ -791,8 +793,9 @@ export class CredentialSync {
       }
       const budgetMs = leaseEnd - STORE_RESERVE_MS - this.now();
       if (budgetMs < MIN_REFRESH_BUDGET_MS) {
-        // The lock call itself ate the lease.
-        await this._unlock(row, leaseEnd);
+        // The lock call itself ate the lease. With the mark taken, the store would
+        // otherwise keep saying this renewal went out: the unlock says it did not.
+        await this._unlock(row, leaseEnd, { notSent: sendingMark() });
         this.log(`[TeamClaude] Account "${name}": the callback.net lock took too long to answer; trying it again`);
         continue;
       }
@@ -883,9 +886,15 @@ export class CredentialSync {
   }
 
   /** Release the lock, unless the lease has run out: then it may be someone else's. */
-  async _unlock(/** @type {Row} */ row, /** @type {number} */ leaseEnd) {
+  /**
+   * @param {Row} row
+   * @param {number} leaseEnd
+   * @param {{ notSent?: boolean }} [opts]  notSent (fork-only, with the sending mark): the
+   *   renewal was given up before any provider call, so the store withdraws its mark
+   */
+  async _unlock(row, leaseEnd, { notSent = false } = {}) {
     if (this.now() >= leaseEnd) return;
-    try { await this.api('POST', `User/Credential/${row.id}:unlock`, {}); } catch { /* the lock times out on its own */ }
+    try { await this.api('POST', `User/Credential/${row.id}:unlock`, notSent ? { sent: false } : {}); } catch { /* the lock times out on its own */ }
   }
 }
 
