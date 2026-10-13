@@ -62,6 +62,9 @@
 
 import { hostname } from 'node:os';
 import { envVar } from './brand.js';
+
+/** Fork-only (OkoTeamClaude): whether renewals take the store's «sending» mark (see coordinateRefresh). */
+const sendingMark = () => envVar('STORE_SENDING_MARK') === '1';
 import { callbackCall, loadCallbackToken } from './callback-auth.js';
 import { isTokenExpired } from './oauth.js';
 import { providerOf } from './provider.js';
@@ -718,7 +721,7 @@ export class CredentialSync {
       const leaseStart = this.now();
       let locked;
       try {
-        locked = await this.api('POST', `User/Credential/${row.id}:lock`, { timeout: LOCK_TIMEOUT_S });
+        locked = await this.api('POST', `User/Credential/${row.id}:lock`, { timeout: LOCK_TIMEOUT_S, ...(sendingMark() ? { sending: true } : {}) });
       } catch (/** @type {any} */ err) {
         if (err?.token === 'error_not_found') {
           // Deleted since it was read (a tombstone expired, say): find, or
@@ -770,11 +773,19 @@ export class CredentialSync {
       // apart: unmarked, it never reached the provider and the stored token still
       // works; marked, the provider may have rotated it. callback.net has no such
       // call, hence the switch.
-      if (envVar('STORE_SENDING_MARK') === '1') {
+      if (sendingMark()) {
         try {
           await this.api('POST', `User/Credential/${row.id}:sending`, {});
         } catch (/** @type {any} */ err) {
           await this._unlock(row, leaseEnd);
+          // A store that does not know the call answers it like a missing row: a
+          // configuration error (the switch is on against a store without the mark),
+          // not a refusal. Still no renewal — without the mark it does not go out —
+          // but said apart, since it will never succeed until that is fixed.
+          if (err?.token === 'error_not_found' && /:sending\)/.test(String(err?.message))) {
+            this.log(`[TeamClaude] callback store: STORE_SENDING_MARK is set but the store does not implement :sending — nothing will be renewed until it is unset or the store updated`);
+            return this._standDown(account, force, 'STORE_SENDING_MARK is set but the store does not implement :sending (a configuration error)');
+          }
           return this._standDown(account, force, `the store did not take the mark that the renewal is going out (${safeLine(err?.message || String(err), 160)})`);
         }
       }
