@@ -2911,8 +2911,9 @@ export async function peekStreamFailure(stream, bounds = {}) {
 
 /**
  * The answer when the accounts a request reached all held an expired token that
- * could not be renewed. 503 with a short Retry-After: the renewal may go through
- * on the next request (the lock freed, the token endpoint back). Never a 401 or
+ * could not be renewed. 503 with the Retry-After of the token endpoint's 429 hold
+ * when there is one, else a short one: the renewal may go through on the next
+ * request (the lock freed, the token endpoint back). Never a 401 or
  * a 403 — the client's own credential is fine.
  */
 function respondUnrenewed(res, ctx, accountManager) {
@@ -2922,10 +2923,15 @@ function respondUnrenewed(res, ctx, accountManager) {
     const failure = accountManager.accounts.find(a => a.name === name)?._lastRefreshFailure;
     return `the token of "${name}" has expired and could not be renewed${failure ? `: ${failure.reason}` : ''}`;
   }).join('; ');
+  // Come back when a renewal may be tried again: the longest 429 hold among these
+  // accounts (the token endpoint's Retry-After), or 30 s when none is held.
+  const now = Date.now();
+  const held = Math.max(0, ...[...ctx.unrenewed].map((name) => (accountManager.accounts.find(a => a.name === name)?._refreshHeldUntil ?? 0) - now));
+  const retryAfter = held > 0 ? Math.ceil(held / 1000) : 30;
   ctx.status = 503;
   ctx.account = `(${[...ctx.unrenewed].join(', ')} not renewed)`;
   if (!res.headersSent) {
-    res.writeHead(503, { 'Content-Type': 'application/json', 'retry-after': '30' });
+    res.writeHead(503, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });
     res.end(JSON.stringify({
       type: 'error',
       error: { type: 'overloaded_error', message: `No account served this request: ${why}. Retry shortly.` },
