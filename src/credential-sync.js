@@ -809,10 +809,13 @@ export class CredentialSync {
     if (row) return row;
     this.rows = await this._list();
     row = find();
-    // A dead token is not stored for the others to pick up (see isInError),
-    // nor one not minted here (isMinted): renewed without a lock, which no
-    // other install can need, and the fresh token stored (onLocalTokens).
-    if (row || !keyed || isInError(account) || !isMinted(account)) return row;
+    // A dead token is not stored for the others to pick up (see isInError).
+    // One not minted here (isMinted) is: another install may hold the same
+    // token — a config copied, or one account imported on two — and renewing
+    // it there and here without a lock rotates the family twice. The row it
+    // makes lives only until this renewal, under its lock, overwrites it; a
+    // refresh token upstream rejects is emptied as any other (onAccountError).
+    if (row || !keyed || isInError(account)) return row;
     // First here: stored as it stands, then locked like any other. Created by
     // another install meanwhile, theirs is the row — which a create racing it
     // on the live API can also learn as a plain database error, not only as

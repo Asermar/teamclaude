@@ -891,14 +891,31 @@ test('a token that works is still not stored until renewed: a quota reading and 
   assert.ok(!store.calls.some((x) => x.method === 'PATCH' || (x.method === 'POST' && x.path === 'User/Credential')));
 });
 
-test('a token read at launch with no row is renewed without a lock, and the renewal is what gets stored', async () => {
-  const { am, store, refreshed } = setup([claude('a')], { minted: false });
+test('a token read at launch with no row is renewed under a lock on a row made for it, and the renewal is what gets stored', async () => {
+  const { am, store, refreshed, sent } = setup([claude('a')], { minted: false });
   await am.ensureTokenFresh(0, true);
   assert.deepEqual(refreshed, ['rt-a-1']);
-  assert.ok(!store.calls.some((c) => c.path.endsWith(':lock')), 'no row was made from the launch token to lock');
+  assert.ok(store.calls.some((c) => c.path.endsWith(':lock')), 'a row was made to lock');
+  assert.ok(sent.every((s) => s.locked), 'and the renewal went out under it');
   await new Promise((r) => setImmediate(r));
   assert.equal(store.blob(syncKeyFor(am.accounts[0])).accessToken, 'rt-a-1-renewed-at');
   assert.equal(am.accounts[0]._minted, true);
+});
+
+test('two installs holding the same launch token with no row: their first renewals go through the lock, and the token is renewed once', async () => {
+  // A config copied to a second install (or imported on two) carries the same
+  // refresh token, so «no other install can need it» does not hold: renewing it
+  // without a lock on both rotates the family twice, and one copy dies.
+  const store = makeStore();
+  const one = setup([claude('a')], { store, minted: false });
+  const two = setup([claude('a')], { store, minted: false });
+  await Promise.all([one.am.ensureTokenFresh(0, true), two.am.ensureTokenFresh(0, true)]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(one.refreshed.length + two.refreshed.length, 1, `renewed once: ${JSON.stringify([one.refreshed, two.refreshed])}`);
+  assert.ok([...one.sent, ...two.sent].every((s) => s.locked), 'and under the lock');
+  assert.equal(one.am.accounts[0].credential, 'rt-a-1-renewed-at');
+  assert.equal(two.am.accounts[0].credential, 'rt-a-1-renewed-at', 'the other adopts it');
+  assert.equal(store.blob(syncKeyFor(claude('a'))).refreshToken, 'rt-a-1-renewed-rt');
 });
 
 // ── an account in error ──────────────────────────────────────
