@@ -61,6 +61,7 @@
 // tombstone) but neither creates nor updates its row; its next renewal does.
 
 import { hostname } from 'node:os';
+import { envVar } from './brand.js';
 import { callbackCall, loadCallbackToken } from './callback-auth.js';
 import { isTokenExpired } from './oauth.js';
 import { providerOf } from './provider.js';
@@ -761,6 +762,21 @@ export class CredentialSync {
         await this._unlock(row, leaseEnd);
         this.log(`[TeamClaude] Account "${name}": already renewed on ${safeLine(/** @type {Blob} */ (current.blob).by, 48)}; taking that token`);
         return tokensOf(/** @type {Blob} */ (current.blob));
+      }
+      // Fork-only (OkoTeamClaude), and only when STORE_SENDING_MARK is set: the
+      // store is told the renewal is about to go out, and it takes the mark only
+      // while this install may renew (it still owns the account's pool). Refused,
+      // the renewal does not go out. Afterwards, a half-done renewal can be told
+      // apart: unmarked, it never reached the provider and the stored token still
+      // works; marked, the provider may have rotated it. callback.net has no such
+      // call, hence the switch.
+      if (envVar('STORE_SENDING_MARK') === '1') {
+        try {
+          await this.api('POST', `User/Credential/${row.id}:sending`, {});
+        } catch (/** @type {any} */ err) {
+          await this._unlock(row, leaseEnd);
+          return this._standDown(account, force, `the store did not take the mark that the renewal is going out (${safeLine(err?.message || String(err), 160)})`);
+        }
       }
       const budgetMs = leaseEnd - STORE_RESERVE_MS - this.now();
       if (budgetMs < MIN_REFRESH_BUDGET_MS) {
