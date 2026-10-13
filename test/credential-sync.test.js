@@ -1033,3 +1033,74 @@ test('the daily pass is scheduled and stopped', async () => {
   assert.equal(sync._timer, null);
   assert.deepEqual(sync.summary(), { lastSyncAt: store.now(), lastError: null, rows: 1, tombstones: 0, signInNeeded: 0 });
 });
+
+// ── the «sending» mark (fork-only: OkoTeamClaude) ────────────
+
+/**
+ * A store that also answers `:sending`, the mark that the renewal is going out
+ * to the provider: `refuse` makes it fail, as the store does when this install
+ * no longer owns the pool. Every call, in order, goes to `calls`.
+ */
+function storeWithSendingMark({ refuse = false } = {}) {
+  const store = makeStore();
+  const api = store.api;
+  store.api = async (method, path, params, opts) => {
+    if (method === 'POST' && path.endsWith(':sending')) {
+      store.calls.push({ method, path, params });
+      if (refuse) throw Object.assign(new Error('el pool «P» es de «maq-b»'), { token: 'error_not_owner', code: 409 });
+      return {};
+    }
+    return api(method, path, params, opts);
+  };
+  return store;
+}
+
+/** Runs fn with STORE_SENDING_MARK set (or not), restoring the environment after. */
+async function withSendingMark(on, fn) {
+  const before = process.env.TEAMROUTER_STORE_SENDING_MARK;
+  if (on) process.env.TEAMROUTER_STORE_SENDING_MARK = '1';
+  else delete process.env.TEAMROUTER_STORE_SENDING_MARK;
+  try { return await fn(); } finally {
+    if (before === undefined) delete process.env.TEAMROUTER_STORE_SENDING_MARK;
+    else process.env.TEAMROUTER_STORE_SENDING_MARK = before;
+  }
+}
+
+const order = (store) => store.calls.map((c) => (c.path.includes(':') ? `:${c.path.split(':').pop()}` : `${c.method}`))
+  .filter((c) => [':lock', ':sending', ':unlock', 'PATCH'].includes(c));
+
+test('with the sending mark on, the renewal tells the store it is going out, under the lock and before the provider call', async () => {
+  await withSendingMark(true, async () => {
+    const store = storeWithSendingMark();
+    const { am, refreshed } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    const seen = [];
+    const before = refreshed.length;
+    await am.ensureTokenFresh(0, true);
+    seen.push(...order(store));
+    assert.equal(refreshed.length - before, 1);
+    assert.deepEqual(seen, [':lock', ':sending', 'PATCH', ':unlock']);
+  });
+});
+
+test('with the sending mark on, a store that refuses it means the renewal does not go out', async () => {
+  await withSendingMark(true, async () => {
+    const store = storeWithSendingMark({ refuse: true });
+    const { am, refreshed } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    await am.ensureTokenFresh(0, true);
+    assert.deepEqual(refreshed, [], 'no call to the provider');
+    assert.deepEqual(order(store), [':lock', ':sending', ':unlock']);
+  });
+});
+
+test('with the sending mark off (the default, and callback.net), nothing is sent to the store before renewing', async () => {
+  await withSendingMark(false, async () => {
+    const store = storeWithSendingMark();
+    const { am, refreshed } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    await am.ensureTokenFresh(0, true);
+    assert.equal(refreshed.length, 1);
+    assert.deepEqual(order(store), [':lock', 'PATCH', ':unlock']);
+  });
+});
