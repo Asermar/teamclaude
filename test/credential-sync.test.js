@@ -1024,13 +1024,15 @@ test('the daily pass is scheduled and stopped', async () => {
  * to the provider: `refuse` makes it fail, as the store does when this install
  * no longer owns the pool. Every call, in order, goes to `calls`.
  */
-function storeWithSendingMark({ refuse = false } = {}) {
+function storeWithSendingMark({ refuse = false, unknown = false } = {}) {
   const store = makeStore();
   const api = store.api;
   store.api = async (method, path, params, opts) => {
     if (method === 'POST' && path.endsWith(':sending')) {
       store.calls.push({ method, path, params });
-      if (refuse) throw Object.assign(new Error('el pool «P» es de «maq-b»'), { token: 'error_not_owner', code: 409 });
+      // A store without the call answers it like a missing row, as the live API does.
+      if (unknown) throw Object.assign(new Error(`Not Found: User\\Credential(${path.split('/').pop()})`), { token: 'error_not_found', code: 404 });
+      if (refuse) throw Object.assign(new Error('this install may not renew this account'), { token: 'error_not_owner', code: 409 });
       return {};
     }
     return api(method, path, params, opts);
@@ -1085,5 +1087,29 @@ test('with the sending mark off (the default, and callback.net), nothing is sent
     await am.ensureTokenFresh(0, true);
     assert.equal(refreshed.length, 1);
     assert.deepEqual(order(store), [':lock', 'PATCH', ':unlock']);
+  });
+});
+
+test('with the sending mark on, the lock says so (sending: true), and off it does not', async () => {
+  for (const on of [true, false]) {
+    await withSendingMark(on, async () => {
+      const store = storeWithSendingMark();
+      const { am } = setup([claude('a')], { store });
+      store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+      await am.ensureTokenFresh(0, true);
+      const lock = store.calls.find((c) => c.path.endsWith(':lock'));
+      assert.deepEqual(lock.params, on ? { timeout: 30, sending: true } : { timeout: 30 });
+    });
+  }
+});
+
+test('with the sending mark on and a store without :sending, nothing is renewed and the log says it is a configuration error', async () => {
+  await withSendingMark(true, async () => {
+    const store = storeWithSendingMark({ unknown: true });
+    const { am, refreshed, logs } = setup([claude('a')], { store });
+    store.put(syncKeyFor(claude('a')), encodeBlob(claude('a'), tokensOf({ ...claude('a'), credential: 'at-a-1' }), { now: T0, by: 'office' }));
+    await am.ensureTokenFresh(0, true);
+    assert.deepEqual(refreshed, []);
+    assert.ok(logs.some((l) => /STORE_SENDING_MARK is set but the store does not implement :sending/.test(l)), logs.join('\n'));
   });
 });
