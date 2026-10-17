@@ -1731,7 +1731,7 @@ export class AccountManager {
           // once, so the destination gets the same failover burst any other
           // switch would send it — pace it (issue #84).
           this._beginRamp(next);
-          console.log(`[TeamClaude] Session pin on "${pinned.name}" released — its weekly window rolled over; re-routing to "${next.name}"`);
+          console.log(`[TeamClaude] Session pin on "${safeLine(pinned.name, 64)}" released — its weekly window rolled over; re-routing to "${safeLine(next.name, 64)}"`);
           return next;
         }
         // The traffic did not move, so the observation is left where it is and
@@ -2429,9 +2429,9 @@ export class AccountManager {
     this._setCurrent(best);
     this._beginRamp(best);
     if (best.status === 'throttled') {
-      console.log(`[TeamClaude] All accounts unavailable — revalidating throttled "${best.name}" with a live request`);
+      console.log(`[TeamClaude] All accounts unavailable — revalidating throttled "${safeLine(best.name, 64)}" with a live request`);
     } else {
-      console.log(`[TeamClaude] All accounts over threshold — probing "${best.name}" to refresh quota`);
+      console.log(`[TeamClaude] All accounts over threshold — probing "${safeLine(best.name, 64)}" to refresh quota`);
     }
     return best;
   }
@@ -2674,7 +2674,7 @@ export class AccountManager {
     // Phrased to read correctly after "<name> is ..." in the caller's message.
     const preemptor = this._preemptedBy(account);
     if (preemptor) {
-      return { eligible: false, reason: `outranked by higher-priority account "${preemptor.name}"` };
+      return { eligible: false, reason: `outranked by higher-priority account "${safeLine(preemptor.name, 64)}"` };
     }
     return { eligible: true };
   }
@@ -3943,7 +3943,7 @@ export class AccountManager {
     // failed back onto the same account still finds the roll waiting.
     this._setCurrent(best);
     this._beginRamp(best);
-    console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
+    console.log(`[TeamClaude] Account "${safeLine(best.name, 64)}" session quota reset and weekly expires sooner — switching to it`);
   }
 
   _isNearQuota(account, model = null) {
@@ -4056,7 +4056,7 @@ export class AccountManager {
     const wk = best.quota.unified7d != null
       ? `${(best.quota.unified7d * 100).toFixed(1)}% weekly used`
       : 'weekly quota unknown';
-    console.log(`[TeamClaude] Starting on account "${best.name}" (priority ${best.priority || 0}, ${wk})`);
+    console.log(`[TeamClaude] Starting on account "${safeLine(best.name, 64)}" (priority ${best.priority || 0}, ${wk})`);
     return best;
   }
 
@@ -4125,7 +4125,7 @@ export class AccountManager {
       soonestAccount.rateLimitedUntil = null;
       this._setCurrent(soonestAccount);
       this._beginRamp(soonestAccount);
-      console.log(`[TeamClaude] Account "${soonestAccount.name}" reset, switching to it`);
+      console.log(`[TeamClaude] Account "${safeLine(soonestAccount.name, 64)}" reset, switching to it`);
       return soonestAccount;
     }
 
