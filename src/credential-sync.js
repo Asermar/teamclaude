@@ -739,9 +739,13 @@ export class CredentialSync {
           let r;
           try { r = rowOf(await this.api('GET', `User/Credential/${row.id}`)); } catch { return this._standDown(account, force, why); }
           this.rows.set(r.key, r);
-          if (r.deletedAt == null && heldElsewhere(r.blob, account, this.by) && !isTokenExpired(/** @type {Blob} */ (r.blob).expiresAt)) {
-            this.log(`[TeamClaude] Account "${name}": not the pool's owner; taking the token ${safeLine(/** @type {Blob} */ (r.blob).by, 48)} published`);
-            return tokensOf(/** @type {Blob} */ (r.blob));
+          const pub = /** @type {Blob} */ (r.blob);
+          // Without the lock nothing says the row's token is the newer one: one
+          // that expires before ours is taken only when ours was just rejected.
+          if (r.deletedAt == null && heldElsewhere(pub, account, this.by) && !isTokenExpired(pub.expiresAt)
+            && (force || pub.expiresAt > (Number(account.expiresAt) || 0))) {
+            this.log(`[TeamClaude] Account "${name}": not the pool's owner; taking the token ${safeLine(pub.by, 48)} published`);
+            return tokensOf(pub);
           }
           return this._standDown(account, force, why);
         }
