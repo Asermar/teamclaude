@@ -3947,11 +3947,27 @@ export class AccountManager {
   }
 
   _isNearQuota(account, model = null) {
+    return this._nearQuotaReason(account, model) != null;
+  }
+
+  /**
+   * Which bucket puts `account` at its switch threshold for `model`, or null
+   * when none does. _isNearQuota's rule, kept here so the line that announces
+   * a switch names the bucket that actually tripped it.
+   * @returns {{ bucket: string, used: number, threshold: number }|null}
+   */
+  _nearQuotaReason(account, model = null) {
     const q = account.quota;
     this._clearExpiredQuotas(account);
+    const over = (/** @type {string} */ bucket, /** @type {number} */ used) => {
+      const threshold = this.thresholdFor(bucket, account);
+      return used >= threshold ? { bucket, used, threshold } : null;
+    };
+    /** @type {{ bucket: string, used: number, threshold: number }|null} */
+    let reason;
 
     // Shared 5-hour bucket gates every request regardless of model.
-    if (q.unified5h != null && q.unified5h >= this.thresholdFor('unified5h', account)) return true;
+    if (q.unified5h != null && (reason = over('unified5h', q.unified5h))) return reason;
 
     // The HIGHER of the weekly bucket that GOVERNS this model and the shared
     // weekly one. Fable and Sonnet meter their own quota, so a spent Fable
@@ -3961,20 +3977,18 @@ export class AccountManager {
     // ratcheting further past that cap. When the family bucket isn't reported
     // (e.g. the plan doesn't expose it) the shared one answers alone.
     const weeklyVal = this._governingWeekly(account, model);
-    if (weeklyVal != null && weeklyVal >= this.thresholdFor(this._weeklyBucketFor(model), account)) return true;
+    if (weeklyVal != null && (reason = over(this._weeklyBucketFor(model), weeklyVal))) return reason;
 
     // Standard quotas (API key accounts)
     if (q.tokensLimit != null && q.tokensRemaining != null) {
-      const used = 1 - (q.tokensRemaining / q.tokensLimit);
-      if (used >= this.thresholdFor('tokens', account)) return true;
+      if ((reason = over('tokens', 1 - (q.tokensRemaining / q.tokensLimit)))) return reason;
     }
 
     if (q.requestsLimit != null && q.requestsRemaining != null) {
-      const used = 1 - (q.requestsRemaining / q.requestsLimit);
-      if (used >= this.thresholdFor('requests', account)) return true;
+      if ((reason = over('requests', 1 - (q.requestsRemaining / q.requestsLimit)))) return reason;
     }
 
-    return false;
+    return null;
   }
 
   /**
@@ -4071,8 +4085,8 @@ export class AccountManager {
       if (switched) {
         this._beginRamp(best);
         console.log(scoped
-          ? `[TeamClaude] Diverting "${safeLine(model, 64)}" to "${best.name}" — "${current.name}" cannot serve it`
-          : `[TeamClaude] Switched to account "${best.name}"`);
+          ? `[TeamClaude] Diverting "${safeLine(model, 64)}" to "${safeLine(best.name, 64)}" — "${safeLine(current.name, 64)}" cannot serve it`
+          : `[TeamClaude] Switched to account "${safeLine(best.name, 64)}" from "${safeLine(this.accounts[previous]?.name, 64)}"`);
       }
       return best;
     }
@@ -4341,14 +4355,12 @@ export class AccountManager {
     account.usage.totalRequests++;
     account.usage.lastUsed = new Date().toISOString();
 
-    // Log when approaching quota
-    if (this._isNearQuota(account)) {
-      const pct = account.quota.unified7d != null
-        ? (account.quota.unified7d * 100).toFixed(1)
-        : account.quota.tokensLimit
-          ? ((1 - account.quota.tokensRemaining / account.quota.tokensLimit) * 100).toFixed(1)
-          : '?';
-      console.log(`[TeamClaude] Account "${safeLine(account.name, 64)}" at ${pct}% usage — will switch on next request`);
+    // Log when approaching quota, naming the bucket that tripped it: the weekly
+    // figure alone read as the reason even when the 5-hour window was spent.
+    const near = this._nearQuotaReason(account);
+    if (near) {
+      const pct = (/** @type {number} */ v) => `${(v * 100).toFixed(1)}%`;
+      console.log(`[TeamClaude] Account "${safeLine(account.name, 64)}" at ${pct(near.used)} ${near.bucket} (threshold ${pct(near.threshold)}) — will switch on next request`);
     }
   }
 
