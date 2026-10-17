@@ -52,3 +52,15 @@ test('a name carrying a newline cannot split the switch line into two entries', 
   assert.ok(line, lines.join('\n'));
   assert.equal(line.includes('\n'), false, JSON.stringify(line));
 });
+
+test('a name carrying a newline cannot split the divert line into two entries', () => {
+  const am = new AccountManager([oauth('a\nforged'), oauth('b\nforged')], 0.98);
+  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8').name, 'a\nforged');
+  // a's Fable weekly is spent: it serves Opus but a Fable request is diverted.
+  am.accounts[0].quota.unified7dFable = 0.999;
+  am.accounts[0].quota.unified7dFableReset = Date.now() + 3600_000;
+  const lines = captureLog(() => am.getActiveAccount(null, 'claude-fable-5'));
+  const line = lines.find(l => l.includes('Diverting'));
+  assert.ok(line, lines.join('\n'));
+  assert.equal(line.includes('\n'), false, JSON.stringify(line));
+});

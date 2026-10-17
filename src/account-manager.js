@@ -4085,7 +4085,7 @@ export class AccountManager {
       if (switched) {
         this._beginRamp(best);
         console.log(scoped
-          ? `[TeamClaude] Diverting "${safeLine(model, 64)}" to "${best.name}" — "${current.name}" cannot serve it`
+          ? `[TeamClaude] Diverting "${safeLine(model, 64)}" to "${safeLine(best.name, 64)}" — "${safeLine(current.name, 64)}" cannot serve it`
           : `[TeamClaude] Switched to account "${safeLine(best.name, 64)}" from "${safeLine(this.accounts[previous]?.name, 64)}"`);
       }
       return best;
