@@ -2674,7 +2674,7 @@ export class AccountManager {
     // Phrased to read correctly after "<name> is ..." in the caller's message.
     const preemptor = this._preemptedBy(account);
     if (preemptor) {
-      return { eligible: false, reason: `outranked by higher-priority account "${safeLine(preemptor.name, 64)}"` };
+      return { eligible: false, reason: `outranked by higher-priority account "${preemptor.name}"` };
     }
     return { eligible: true };
   }
