@@ -42,3 +42,13 @@ test('the switch line names the account it switched from', () => {
   const lines = captureLog(() => assert.equal(am.getActiveAccount().name, 'b'));
   assert.ok(lines.some(l => l.includes('Switched to account "b" from "a"')), lines.join('\n'));
 });
+
+test('a name carrying a newline cannot split the switch line into two entries', () => {
+  const am = new AccountManager([oauth('a\nforged'), oauth('b\nforged')], 0.98);
+  am.getActiveAccount();
+  am.setDisabled(0, true);
+  const lines = captureLog(() => am.getActiveAccount());
+  const line = lines.find(l => l.includes('Switched to account'));
+  assert.ok(line, lines.join('\n'));
+  assert.equal(line.includes('\n'), false, JSON.stringify(line));
+});

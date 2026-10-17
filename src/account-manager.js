@@ -4086,7 +4086,7 @@ export class AccountManager {
         this._beginRamp(best);
         console.log(scoped
           ? `[TeamClaude] Diverting "${safeLine(model, 64)}" to "${best.name}" — "${current.name}" cannot serve it`
-          : `[TeamClaude] Switched to account "${best.name}" from "${this.accounts[previous]?.name}"`);
+          : `[TeamClaude] Switched to account "${safeLine(best.name, 64)}" from "${safeLine(this.accounts[previous]?.name, 64)}"`);
       }
       return best;
     }
