@@ -21,6 +21,7 @@
 import { spawn } from 'node:child_process';
 import { encodePinComponent } from './claude-env.js';
 import { providerOf } from './provider.js';
+import { safeLine } from './safe-text.js';
 import {
   ROLLING_NEAR_RESET_TOLERANCE_MS,
   ROLLING_POST_RESET_BUFFER_MS,
@@ -304,7 +305,7 @@ export class Warmer {
     }, delay);
     this._deferredWarmups.set(account, timer);
     timer.unref?.();
-    this.log(`[TeamClaude] Keep-warm delaying "${account.name}" until ${new Date(runAt).toISOString()} (5h reset within 2m)`);
+    this.log(`[TeamClaude] Keep-warm delaying "${safeLine(account.name, 64)}" until ${new Date(runAt).toISOString()} (5h reset within 2m)`);
   }
 
   _clearDeferredWarmups() {

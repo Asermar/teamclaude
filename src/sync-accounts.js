@@ -89,8 +89,8 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
       claimed.add(accountManager.accounts.length - 1);
       added++;
       console.log(cfgAcct
-        ? `[TeamClaude] Re-admitting known account "${diskAcct.name}" from config`
-        : `[TeamClaude] Picked up new account "${diskAcct.name}" from config`);
+        ? `[TeamClaude] Re-admitting known account "${safeLine(diskAcct.name, 64)}" from config`
+        : `[TeamClaude] Picked up new account "${safeLine(diskAcct.name, 64)}" from config`);
       continue;
     }
 

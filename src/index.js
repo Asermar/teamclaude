@@ -372,7 +372,7 @@ async function serverCommand() {
   for (const acct of config.accounts) {
     if (!acct.models?.length) continue;
     const route = { name: acct.name, match: acct.models, accounts: [acct.name] };
-    console.error(`[TeamClaude] Deprecated: account "${acct.name}" uses "models" — replace it with a routes entry: ${JSON.stringify(route)}`);
+    console.error(`[TeamClaude] Deprecated: account "${safeLine(acct.name, 64)}" uses "models" — replace it with a routes entry: ${JSON.stringify(route)}`);
   }
 
   const threshold = config.switchThreshold || 0.98;
@@ -449,7 +449,7 @@ async function serverCommand() {
     }
     atomicConfigUpdate((/** @type {any} */ diskConfig) => {
       diskConfig.accounts = diskConfig.accounts.filter((/** @type {any} */ a) => (entryId ? a.id !== entryId : !sameIdentity(a, account)));
-    }).catch((/** @type {any} */ err) => console.error(`[TeamClaude] Failed to save the removal of "${account.name}": ${err.message}`));
+    }).catch((/** @type {any} */ err) => console.error(`[TeamClaude] Failed to save the removal of "${safeLine(account.name, 64)}": ${err.message}`));
   };
 
   // Credential sync through callback.net: active only while this install is
@@ -970,7 +970,7 @@ async function serverCommand() {
       console.log(`  Upstream:   ${config.upstream || 'https://api.anthropic.com'}`);
       console.log('');
       accounts.forEach((a, i) => {
-        console.log(`  [${i + 1}] ${a.name} (${a.type})`);
+        console.log(`  [${i + 1}] ${safeLine(a.name, 64)} (${a.type})`);
       });
       console.log('');
       console.log('  Run Claude through proxy:  teamclaude run');

@@ -702,8 +702,8 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
           // headless deployment this endpoint is the only way the change
           // happens, and an account leaving rotation should never be silent.
           console.log(`[TeamClaude] ${isPriority
-            ? `Set priority of "${result.name}" to ${result.priority}`
-            : `${result.disabled ? 'Disabled' : 'Enabled'} account "${result.name}"`} (control endpoint)`);
+            ? `Set priority of "${safeLine(result.name, 64)}" to ${result.priority}`
+            : `${result.disabled ? 'Disabled' : 'Enabled'} account "${safeLine(result.name, 64)}"`} (control endpoint)`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
@@ -785,7 +785,7 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
         // to the activity log, so this one line covers both. Without it a manual
         // switch is the only account change that happens invisibly — on exactly
         // the background-service deployment this endpoint exists for.
-        console.log(`[TeamClaude] Switched to account "${name}" (manual)`
+        console.log(`[TeamClaude] Switched to account "${safeLine(name, 64)}" (manual)`
           + (eligible ? '' : ` — ${reason}, so rotation will not use it`));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, account: name, eligible, ...(reason ? { reason } : {}) }));
@@ -3218,7 +3218,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   if (account.type === 'oauth' && account.refreshToken && !account.upstream && isTokenExpired(account.expiresAt)) {
     (ctx.unrenewed ??= new Set()).add(account.name);
     ctx.tried.add(account.index);
-    console.error(`[TeamClaude] "${account.name}": token expired and not renewed; not sending it upstream`);
+    console.error(`[TeamClaude] "${safeLine(account.name, 64)}": token expired and not renewed; not sending it upstream`);
     if (ctx.pinnedIndex == null && retryCount < maxRetries) {
       return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
     }
@@ -3470,13 +3470,13 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         // selection skip it for Fable requests only. A general rejection spends a
         // shared bucket, so hold the whole account for its reset window.
         if (fableRejected) {
-          console.log(`[TeamClaude] Fable weekly exhausted on "${account.name}" — switching account for this Fable request`);
+          console.log(`[TeamClaude] Fable weekly exhausted on "${safeLine(account.name, 64)}" — switching account for this Fable request`);
         } else if (codexFamilyRejected) {
           // The same shape as the Fable case: this request moves to another
           // account and the account itself is left alone. Unlike Fable, selection
           // does not yet skip the account for this model family afterwards, so a
           // later request for it pays one refusal here before it rotates.
-          console.log(`[TeamClaude] ${safeLine(spentCodexWindows.join(', '), 80)} spent on "${account.name}" — switching account for this request`);
+          console.log(`[TeamClaude] ${safeLine(spentCodexWindows.join(', '), 80)} spent on "${safeLine(account.name, 64)}" — switching account for this request`);
         } else {
           const hold = Math.min(Math.max(retryAfter, 1), 3600);
           // Name the spent window when the headers said which: "which one" is
@@ -3485,7 +3485,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           // label carries upstream's own text, so it goes through safeLine.
           const spent = spentCodexWindows.length
             ? ` (${safeLine(spentCodexWindows.join(', '), 80)} spent)` : '';
-          console.log(`[TeamClaude] Quota rejection (429) on "${account.name}"${spent} — throttling ${hold}s and switching account`);
+          console.log(`[TeamClaude] Quota rejection (429) on "${safeLine(account.name, 64)}"${spent} — throttling ${hold}s and switching account`);
           accountManager.markRateLimited(account.index, hold);
         }
         ctx.tried.add(account.index);
@@ -3571,7 +3571,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           ctx.rateLimitHopSharedExit = !routed && !alt.routing;
           ctx.hopTo = alt.index;
           ctx.tried.add(account.index);
-          console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — failing over once to idle account "${alt.name}"`);
+          console.log(`[TeamClaude] Rate-limit 429 on "${safeLine(account.name, 64)}" — failing over once to idle account "${safeLine(alt.name, 64)}"`);
           if (clientGone(res)) { ctx.abandoned = true; return; }
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
         }
@@ -3612,14 +3612,14 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           && !res.headersSent && !clientGone(res) && !ctx.signal?.aborted) {
           // Once per request: a retry that is refused too has made the point.
           ctx.requestScopedRetried = true;
-          console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — retrying it once on the same account in ${retryDelayMs}ms`
+          console.log(`[TeamClaude] 429 followed the request onto "${safeLine(account.name, 64)}" with no rate-limit headers — retrying it once on the same account in ${retryDelayMs}ms`
             + (refusal ? ` (${safeLine(refusal)})` : ''));
           await waitForRetry(retryDelayMs, ctx.signal);
           if (clientGone(res)) { ctx.abandoned = true; return; }
           ctx.hopTo = account.index;
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
         }
-        console.log(`[TeamClaude] 429 followed the request onto "${account.name}" with no rate-limit headers — it is about the request, not the accounts; returning it to the client`
+        console.log(`[TeamClaude] 429 followed the request onto "${safeLine(account.name, 64)}" with no rate-limit headers — it is about the request, not the accounts; returning it to the client`
           + (refusal ? ` (${safeLine(refusal)})` : ''));
       } else if (ctx.rateLimitHopped) {
         // Second 429 this request, on a different account. Say so once: the
@@ -3637,7 +3637,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // Bounded by retryCount like the inline-wait path below, so a persistently
       // 429ing upstream can't loop forever through sx.
       if (switchingToSx && retryCount < maxRetries) {
-        console.log(`[TeamClaude] 429 on "${account.name}" — retrying via sx.org (fresh egress IP)`);
+        console.log(`[TeamClaude] 429 on "${safeLine(account.name, 64)}" — retrying via sx.org (fresh egress IP)`);
         if (clientGone(res)) { ctx.abandoned = true; return; }
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
       }
@@ -3655,7 +3655,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         const retryDelayMs = resolveHeaderless429RetryDelayMs();
         if (retryDelayMs > 0 && !ctx.rateLimitHopped && !ctx.requestScopedRetried && retryCount < maxRetries) {
           ctx.requestScopedRetried = true;
-          console.log(`[TeamClaude] 429 with no rate-limit headers on "${account.name}" — retrying once in ${retryDelayMs}ms${refusal ? ` (${safeLine(refusal)})` : ''}`);
+          console.log(`[TeamClaude] 429 with no rate-limit headers on "${safeLine(account.name, 64)}" — retrying once in ${retryDelayMs}ms${refusal ? ` (${safeLine(refusal)})` : ''}`);
           await waitForRetry(retryDelayMs, ctx.signal);
           if (clientGone(res)) { ctx.abandoned = true; return; }
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
@@ -3674,7 +3674,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // 429. Bounded by retryCount (maxRetries = account count) so a persistently
       // rate-limited account can't loop forever tying up the connection.
       if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries) {
-        console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — waiting ${retryAfter}s, retrying same account (no switch)`);
+        console.log(`[TeamClaude] Rate-limit 429 on "${safeLine(account.name, 64)}" — waiting ${retryAfter}s, retrying same account (no switch)`);
         await waitForRetry(retryAfter * 1000, ctx.signal);
         if (clientGone(res)) { ctx.abandoned = true; return; }
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
@@ -3683,7 +3683,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // Longer retry-after (or retries exhausted): don't hold the connection and
       // don't rotate — surface the 429 with retry-after so the client backs off.
       // The pause above keeps other requests off this account meanwhile.
-      console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — retry-after ${retryAfter}s over inline cap; returning 429 to client (no switch)`);
+      console.log(`[TeamClaude] Rate-limit 429 on "${safeLine(account.name, 64)}" — retry-after ${retryAfter}s over inline cap; returning 429 to client (no switch)`);
       ctx.status = 429;
       if (!res.headersSent && !clientGone(res)) {
         res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });
@@ -3726,7 +3726,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         ctx.serverErrorHopped = true;
         ctx.hopTo = alt.index;
         ctx.tried.add(account.index);
-        console.log(`[TeamClaude] Upstream ${upstreamRes.status} on "${account.name}" — failing over once to "${alt.name}"`);
+        console.log(`[TeamClaude] Upstream ${upstreamRes.status} on "${safeLine(account.name, 64)}" — failing over once to "${safeLine(alt.name, 64)}"`);
         if (clientGone(res)) { ctx.abandoned = true; return; }
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
       }
@@ -3757,7 +3757,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const cooldown = deniedUntil
         ? `; OAuth entitlement cooldown until ${new Date(deniedUntil).toISOString()}`
         : '';
-      console.error(`[TeamClaude] 403 on "${account.name}"; upstream refused the account credential${cooldown}`);
+      console.error(`[TeamClaude] 403 on "${safeLine(account.name, 64)}"; upstream refused the account credential${cooldown}`);
       return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
     }
 
@@ -3765,7 +3765,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
         && retryCount < maxRetries && !ctx.reauthed.has(account.index)) {
       ctx.reauthed.add(account.index);
       await upstreamRes.body?.cancel();
-      console.log(`[TeamClaude] 401 on "${account.name}" — token rejected; forcing refresh and retrying`);
+      console.log(`[TeamClaude] 401 on "${safeLine(account.name, 64)}" — token rejected; forcing refresh and retrying`);
       await accountManager.ensureTokenFresh(account.index, true);
       if (clientGone(res)) { ctx.abandoned = true; return; }
       return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
@@ -3841,7 +3841,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           ctx.streamFailureHopped = true;
           ctx.hopTo = alt.index;
           ctx.tried.add(account.index);
-          console.log(`[TeamClaude] Stream failed inside a ${upstreamRes.status} on "${account.name}" (${peeked.failureCode}) — failing over once to "${alt.name}"`);
+          console.log(`[TeamClaude] Stream failed inside a ${upstreamRes.status} on "${safeLine(account.name, 64)}" (${peeked.failureCode}) — failing over once to "${safeLine(alt.name, 64)}"`);
           if (clientGone(res)) { ctx.abandoned = true; return; }
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
         }
@@ -3941,7 +3941,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // of rotation briefly so the requests behind this one do not each pay the
     // same connect failure, and fail this one over below (isTransientUpstreamError).
     const routingFailed = isRoutingFailure(err);
-    if (clientLeft) console.log(`[TeamClaude] Client disconnected while waiting on "${account.name}" — upstream request cancelled`);
+    if (clientLeft) console.log(`[TeamClaude] Client disconnected while waiting on "${safeLine(account.name, 64)}" — upstream request cancelled`);
     else if (overloaded) console.error(`[TeamClaude] Upstream admission queue full (${describeConnectError(err)}) — 503 to the client, no account rotation`);
     else if (routingFailed) {
       const until = accountManager.markRoutingFailed(account.index);
@@ -3949,7 +3949,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // err.message, not describeConnectError: that prefers the cause, which
       // is the bare socket error and does not say a routing proxy was involved.
       console.error(`[TeamClaude] Routing proxy failed for account "${safeLine(account.name, 64)}" (${describeRouting(account.routing) || 'routing'}): ${safeLine(err instanceof Error ? err.message : String(err), 300)}${hold}`);
-    } else console.error(`[TeamClaude] Upstream error (account "${account.name}"):`, describeConnectError(err));
+    } else console.error(`[TeamClaude] Upstream error (account "${safeLine(account.name, 64)}"):`, describeConnectError(err));
 
     logRequestHead();
     const l = getLog();
