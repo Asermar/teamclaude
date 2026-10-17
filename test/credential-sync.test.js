@@ -573,6 +573,68 @@ test('a lock refused every round: the refresh gives up rather than renewing with
   assert.ok(logs.some((l) => /not renewing, the callback\.net lock was not to be had in 3 rounds/.test(l)), logs.join('\n'));
 });
 
+// Fork-only (OkoTeamClaude): an install that does not own the account's pool is
+// refused the lock with error_not_owner. It may not renew, but it may use what
+// the owner has published, so it reads the row again instead of giving up.
+const NOT_OWNER = 'el pool «uno» es de «tharsis», no de esta máquina («mercurio»); para renovar aquí: claude-dist proxy tomar uno';
+function notOwner(t, account, published) {
+  const { sync, store } = t;
+  const row = store.byKey(syncKeyFor(account));
+  if (published) row.Data = JSON.stringify(encodeBlob(published, tokensOf(published), { now: store.now(), by: 'tharsis' }));
+  sync.api = async (method, path, params, opts) => {
+    if (path.endsWith(':lock')) throw Object.assign(new Error(NOT_OWNER), { token: 'error_not_owner', code: 409 });
+    return store.api(method, path, params, opts);
+  };
+}
+
+test('not the owner, token expired: the token the owner published is adopted, nothing is renewed', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() - 60_000 })]);
+  const { sync, am, refreshed, logs } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: Date.now() + 8 * H };
+  notOwner(t, am.accounts[0], published);
+  await am.ensureTokenFresh(0);
+  assert.deepEqual(refreshed, [], 'never renewed without owning the pool');
+  assert.equal(am.accounts[0].credential, 'at-a-owner');
+  assert.equal(am.accounts[0].refreshToken, 'rt-a-owner');
+  assert.ok(logs.some((l) => /taking the token tharsis published/.test(l)), logs.join('\n'));
+});
+
+test('not the owner, token about to expire: the published token is adopted before it does', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() + 2 * 60_000 })]);
+  const { sync, am, refreshed } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: Date.now() + 8 * H };
+  notOwner(t, am.accounts[0], published);
+  await am.ensureTokenFresh(0);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-owner');
+});
+
+test('not the owner and the row holds nothing better: no renewal, and the line says who owns it', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() - 60_000 })]);
+  const { sync, am, refreshed, logs } = t;
+  await sync.sync(); // the row holds this install's own token
+  notOwner(t, am.accounts[0], null);
+  await am.ensureTokenFresh(0);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.equal(am.accounts[0].status, 'active');
+  assert.ok(logs.some((l) => /not renewing, this install does not own the pool \(el pool «uno» es de «tharsis»/.test(l)), logs.join('\n'));
+});
+
+test('not the owner and the row holds a different token that has expired too: not adopted', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() - 60_000 })]);
+  const { sync, am, refreshed, logs } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: Date.now() - 30_000 };
+  notOwner(t, am.accounts[0], published);
+  await am.ensureTokenFresh(0);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.ok(logs.some((l) => /does not own the pool/.test(l)), logs.join('\n'));
+});
+
 test('an account the store has never seen gets its row first, and is renewed under that row\'s lock', async () => {
   const { am, store, refreshed, sent } = setup([claude('a')]);
   // No pass has run: the row does not exist.
