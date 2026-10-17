@@ -670,6 +670,80 @@ test('not the owner, our token just rejected: a working token on the row is take
   assert.equal(am.accounts[0].credential, 'at-a-owner');
 });
 
+test('not the owner: a row token stamped with expiresAt 0 is never taken, even when ours was just rejected', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() + 8 * H })]);
+  const { sync, am, store, refreshed } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: 0 };
+  notOwner(t, am.accounts[0], published);
+  await am.ensureTokenFresh(0, true);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.equal(JSON.parse(store.byKey(syncKeyFor(am.accounts[0])).Data).expiresAt, 0, 'the row did hold expiresAt 0');
+});
+
+test('not the owner: a row expiry written in seconds is compared as the time it is', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() + 2 * 60_000 })]);
+  const { sync, am, store, refreshed } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: Math.floor((Date.now() + 8 * H) / 1000) };
+  notOwner(t, am.accounts[0], published);
+  assert.ok(JSON.parse(store.byKey(syncKeyFor(am.accounts[0])).Data).expiresAt < 1e12, 'the row did hold seconds');
+  await am.ensureTokenFresh(0);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-owner', 'eight hours from now is later than two minutes from now, in any unit');
+});
+
+// The store answering for an account's row with one that is not that account's:
+// another key, or tokens naming another account under its key. Whichever way the
+// tokens on it were reached, they are not taken, nothing is renewed over that
+// row, and it is not cached.
+const ROW_ANSWERS = {
+  'another key': (store, a) => {
+    const mine = { ...a, credential: 'at-a-x', refreshToken: 'rt-a-x', expiresAt: Date.now() + 8 * H };
+    return (v) => ({ ...v, Key: `${KEY_PREFIX}anthropic.someone-else`, Data: JSON.stringify(encodeBlob(mine, tokensOf(mine), { now: store.now(), by: 'tharsis' })) });
+  },
+  'another account under this key': (store) => {
+    const other = { ...claude('b'), credential: 'at-b-x', refreshToken: 'rt-b-x', expiresAt: Date.now() + 8 * H };
+    return (v) => ({ ...v, Data: JSON.stringify(encodeBlob(other, tokensOf(other), { now: store.now(), by: 'tharsis' })) });
+  },
+};
+const ROW_PATHS = {
+  'read again after error_not_owner': (store, id, sub) => async (method, path, params, opts) => {
+    if (path.endsWith(':lock')) throw Object.assign(new Error(NOT_OWNER), { token: 'error_not_owner', code: 409 });
+    if (method === 'GET' && path === `User/Credential/${id}`) return sub(await store.api(method, path, params, opts));
+    return store.api(method, path, params, opts);
+  },
+  'read while another install holds the lock': (store, id, sub) => async (method, path, params, opts) => {
+    if (path.endsWith(':lock')) throw Object.assign(new Error('Credential is locked'), { token: 'error_credential_locked', code: 0 });
+    if (method === 'GET' && path === `User/Credential/${id}`) return sub(await store.api(method, path, params, opts));
+    return store.api(method, path, params, opts);
+  },
+  'returned by the lock': (store, id, sub) => async (method, path, params, opts) => {
+    const r = await store.api(method, path, params, opts);
+    return path === `User/Credential/${id}:lock` ? sub(r) : r;
+  },
+};
+for (const [where, wrap] of Object.entries(ROW_PATHS)) {
+  for (const [what, answer] of Object.entries(ROW_ANSWERS)) {
+    test(`a row ${where} that is not this account's (${what}): its tokens are not taken, nothing is renewed`, async () => {
+      const { sync, am, store, refreshed, logs } = setup([claude('a', { expiresAt: Date.now() - 60_000 })]);
+      await sync.sync();
+      const row = store.byKey(syncKeyFor(am.accounts[0]));
+      const before = row.Data;
+      sync.api = wrap(store, row.User_Credential__, answer(store, am.accounts[0]));
+      await am.ensureTokenFresh(0, true);
+      assert.deepEqual(refreshed, [], 'not renewed: it would have been stored over that row');
+      assert.equal(am.accounts[0].credential, 'at-a-1');
+      assert.equal(am.accounts[0].refreshToken, 'rt-a-1');
+      assert.equal(row.Data, before, 'the row was not written');
+      assert.equal(row.Locked, null, 'and its lock, if taken, was released');
+      assert.ok(![...sync.rows.values()].some((r) => r.key !== syncKeyFor(am.accounts[0]) || r.blob?.name !== 'a'), 'nor cached');
+      assert.ok(logs.some((l) => /another account's row/.test(l)), logs.join('\n'));
+    });
+  }
+}
+
 test('an account the store has never seen gets its row first, and is renewed under that row\'s lock', async () => {
   const { am, store, refreshed, sent } = setup([claude('a')]);
   // No pass has run: the row does not exist.

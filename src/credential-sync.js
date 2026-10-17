@@ -66,7 +66,7 @@ import { envVar } from './brand.js';
 /** Fork-only (OkoTeamClaude): whether renewals take the store's «sending» mark (see coordinateRefresh). */
 const sendingMark = () => envVar('STORE_SENDING_MARK') === '1';
 import { callbackCall, loadCallbackToken } from './callback-auth.js';
-import { isTokenExpired } from './oauth.js';
+import { isTokenExpired, normalizeExpiresAt } from './oauth.js';
 import { providerOf } from './provider.js';
 import { sameIdentity } from './identity.js';
 import { safeLine } from './safe-text.js';
@@ -738,12 +738,14 @@ export class CredentialSync {
           const why = `this install does not own the pool (${safeLine(err?.message || String(err), 160)})`;
           let r;
           try { r = rowOf(await this.api('GET', `User/Credential/${row.id}`)); } catch { return this._standDown(account, force, why); }
+          if (!this._isRowOf(r, row, account)) return this._standDown(account, force, `${why}, and callback.net answered with another account's row`);
           this.rows.set(r.key, r);
           const pub = /** @type {Blob} */ (r.blob);
+          const pubAt = normalizeExpiresAt(pub?.expiresAt);
           // Without the lock nothing says the row's token is the newer one: one
           // that expires before ours is taken only when ours was just rejected.
-          if (r.deletedAt == null && heldElsewhere(pub, account, this.by) && !isTokenExpired(pub.expiresAt)
-            && (force || pub.expiresAt > (Number(account.expiresAt) || 0))) {
+          if (r.deletedAt == null && heldElsewhere(pub, account, this.by) && pubAt != null && !isTokenExpired(pubAt)
+            && (force || pubAt > (normalizeExpiresAt(account.expiresAt) ?? 0))) {
             this.log(`[TeamClaude] Account "${name}": not the pool's owner; taking the token ${safeLine(pub.by, 48)} published`);
             return tokensOf(pub);
           }
@@ -767,6 +769,7 @@ export class CredentialSync {
           await this.sleep(LOCKED_RECHECK_MS);
           let r;
           try { r = rowOf(await this.api('GET', `User/Credential/${row.id}`)); } catch { continue; }
+          if (!this._isRowOf(r, row, account)) return this._standDown(account, force, 'callback.net answered with another account\'s row');
           this.rows.set(r.key, r);
           if (heldElsewhere(r.blob, account, this.by)) {
             this.log(`[TeamClaude] Account "${name}": renewed on ${safeLine(/** @type {Blob} */ (r.blob).by, 48)} while this install waited`);
@@ -778,6 +781,11 @@ export class CredentialSync {
       }
       const leaseEnd = leaseStart + LOCK_TIMEOUT_S * 1000 - LEASE_SAFETY_MS;
       const current = rowOf({ ...locked, Data: locked?.Data ?? '' });
+      if (!this._isRowOf(current, row, account)) {
+        // Neither adopted nor renewed: a renewal would be stored over that row.
+        await this._unlock(row, leaseEnd);
+        return this._standDown(account, force, 'callback.net answered the lock with another account\'s row');
+      }
       this.rows.set(current.key, current);
       if (current.deletedAt == null && heldElsewhere(current.blob, account, this.by)) {
         await this._unlock(row, leaseEnd);
@@ -879,6 +887,18 @@ export class CredentialSync {
     }
     if (!created) this.rows = await this._list();
     return find();
+  }
+
+  /**
+   * Whether a row the store answered for `row` is this account's: the same key,
+   * and tokens that name this account. An account the store does not carry by
+   * identity has only its row to go by (see _rowToLock).
+   * @param {Row} r
+   * @param {Row} row
+   * @param {Record<string, any>} account
+   */
+  _isRowOf(r, row, account) {
+    return r.key === row.key && (!r.blob || !syncKeyFor(account) || sameIdentity(r.blob, account));
   }
 
   /** The row holding this refresh token, whatever account it names. */
