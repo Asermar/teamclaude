@@ -283,6 +283,27 @@ function revives(/** @type {Blob|null} */ blob, /** @type {Record<string, any>} 
   return !account._deadRefreshToken || blob.refreshToken !== account._deadRefreshToken;
 }
 
+/**
+ * Whether a blob can be the one its row's key was built from: a blob carrying
+ * an identity must carry the one the key names. The account part has to be the
+ * blob's; the organization part may have been built from the orgName where the
+ * blob now has an orgUuid (a row _rowFor found by identity, written since by an
+ * install that knows the orgUuid), so either of the blob's matches it. A blob
+ * with no identity has nothing to be checked against.
+ * @param {string} key
+ * @param {Blob|null} blob
+ */
+function keyFits(key, blob) {
+  if (!blob) return true;
+  const b = { ...blob, type: 'oauth' };
+  if (!isSyncable(b)) return true;
+  if (providerOf(b) === 'codex') return key === syncKeyFor(b);
+  const head = `${KEY_PREFIX}anthropic.${segment(b.accountUuid)}.`;
+  if (!key.startsWith(head)) return false;
+  const org = key.slice(head.length);
+  return org === 'org' || [b.orgUuid, b.orgName].some((v) => v != null && v !== '' && segment(v) === org);
+}
+
 /** @param {any} r @returns {Row} */
 function rowOf(r) {
   return { id: String(r.User_Credential__), key: String(r.Key), blob: decodeBlob(r.Data), deletedAt: tombstoneOf(r.Data), updated: Number(r?.Updated?.unixms) || 0 };
@@ -409,6 +430,10 @@ export class CredentialSync {
           continue;
         }
         matched.add(row.key);
+        if (!this._isRowOf(row, row, account)) {
+          this._foreignRow(account, 'in the listing');
+          continue;
+        }
         if (row.deletedAt != null) {
           // Removed on another install. A sign-in since would have replaced the
           // tombstone (storeSignIn), so the account here is a copy to drop.
@@ -481,7 +506,8 @@ export class CredentialSync {
 
   /**
    * The row for an account: by key, else by the identity its blob carries (a
-   * row written from an entry that named the organization differently).
+   * row written from an entry that named the organization differently). The
+   * row by key is not checked here: its users do (_isRowOf).
    * @param {Record<string, any>} account
    * @returns {Row|null}
    */
@@ -566,7 +592,12 @@ export class CredentialSync {
       if (!this.rows.size) this.rows = await this._list();
       let row = this._rowFor(account);
       if (!row) return false;
-      row = rowOf(await this.api('GET', `User/Credential/${row.id}`));
+      const fresh = rowOf(await this.api('GET', `User/Credential/${row.id}`));
+      if (!this._isRowOf(fresh, row, account)) {
+        this._foreignRow(account, 'read back');
+        return false;
+      }
+      row = fresh;
       this.rows.set(row.key, row);
       // Removed elsewhere: the next pass takes it out. Recovered meanwhile (a
       // reload, an import): nothing to do.
@@ -612,6 +643,11 @@ export class CredentialSync {
     const leaseEnd = leaseStart + LOCK_TIMEOUT_S * 1000 - LEASE_SAFETY_MS;
     try {
       const current = rowOf({ ...locked, Data: locked?.Data ?? '' });
+      // Neither adopted nor emptied; the lock is released below.
+      if (!this._isRowOf(current, row, account)) {
+        this._foreignRow(account, 'the lock returned');
+        return false;
+      }
       this.rows.set(current.key, current);
       if (current.deletedAt != null || !holdsRejectedToken(current.blob, account)) {
         if (current.deletedAt == null && revives(current.blob, account) && this.am.accounts.includes(/** @type {any} */ (account))) {
@@ -898,7 +934,12 @@ export class CredentialSync {
    * @param {Record<string, any>} account
    */
   _isRowOf(r, row, account) {
-    return r.key === row.key && (!r.blob || !syncKeyFor(account) || sameIdentity(r.blob, account));
+    return r.key === row.key && keyFits(r.key, r.blob) && (!r.blob || !syncKeyFor(account) || sameIdentity(r.blob, account));
+  }
+
+  /** Say that a row was left alone for holding another account's tokens. */
+  _foreignRow(/** @type {Record<string, any>} */ account, /** @type {string} */ where) {
+    this.log(`[TeamClaude] callback.net: the row ${where} for "${safeLine(account.name, 64)}" holds another account's tokens; not taken, not written`);
   }
 
   /** The row holding this refresh token, whatever account it names. */

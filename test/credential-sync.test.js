@@ -744,6 +744,126 @@ for (const [where, wrap] of Object.entries(ROW_PATHS)) {
   }
 }
 
+// The same check outside coordinateRefresh: a row under this account's key whose
+// tokens name another account is neither taken nor written, wherever it is met.
+const foreignBlob = (expiresAt) => {
+  const b = { ...claude('b'), credential: 'at-b-x', refreshToken: 'rt-b-x', expiresAt };
+  return encodeBlob(b, tokensOf(b), { now: T0, by: 'office' });
+};
+const FOREIGN = /holds another account's tokens; not taken, not written/;
+
+test('a pass meets, under this account\'s key, another account\'s newer token: not adopted', async () => {
+  const store = makeStore();
+  store.put(syncKeyFor(claude('a')), foreignBlob(T0 + 16 * H));
+  const before = store.byKey(syncKeyFor(claude('a'))).Data;
+  const { sync, am, logs } = setup([claude('a')], { store });
+  await sync.sync();
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.equal(am.accounts.length, 1, 'nor added as an account of its own');
+  assert.equal(store.byKey(syncKeyFor(claude('a'))).Data, before);
+  assert.ok(logs.some((l) => FOREIGN.test(l)), logs.join('\n'));
+});
+
+test('a pass of an account in error meets another account\'s token under its key: not adopted to revive it', async () => {
+  const store = makeStore();
+  store.put(syncKeyFor(claude('a')), foreignBlob(T0 + 16 * H));
+  const before = store.byKey(syncKeyFor(claude('a'))).Data;
+  const { sync, am } = setup([claude('a')], { store });
+  am.accounts[0].status = 'error';
+  am.accounts[0]._deadRefreshToken = 'rt-a-1';
+  await sync.sync();
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.equal(store.byKey(syncKeyFor(claude('a'))).Data, before);
+});
+
+test('a pass holding a newer token of its own does not write it over another account\'s row under its key', async () => {
+  const store = makeStore();
+  store.put(syncKeyFor(claude('a')), foreignBlob(T0 - H));
+  const before = store.byKey(syncKeyFor(claude('a'))).Data;
+  const { sync } = setup([claude('a')], { store }); // minted, and ahead of that row
+  const r = await sync.sync();
+  assert.equal(r.pushed, 0);
+  assert.equal(store.byKey(syncKeyFor(claude('a'))).Data, before);
+});
+
+test('an account gone into error reads its row back and finds another account\'s token: not adopted, not cached', async () => {
+  const { sync, am, store, logs } = setup([claude('a')]);
+  await sync.sync();
+  const row = store.byKey(syncKeyFor(am.accounts[0]));
+  am.accounts[0].status = 'error';
+  sync.api = async (method, path, params, opts) => {
+    const r = await store.api(method, path, params, opts);
+    return method === 'GET' && path === `User/Credential/${row.User_Credential__}` ? { ...r, Data: JSON.stringify(foreignBlob(T0 + 16 * H)) } : r;
+  };
+  assert.equal(await sync.onAccountError(am.accounts[0]), false);
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.ok(![...sync.rows.values()].some((r) => r.blob?.name === 'b'), 'not cached');
+  assert.ok(logs.some((l) => FOREIGN.test(l)), logs.join('\n'));
+});
+
+test('emptying a rejected token: a lock that returns another account\'s token is neither adopted nor emptied, and released', async () => {
+  const { sync, am, store } = setup([claude('a')]);
+  await sync.sync();
+  const row = store.byKey(syncKeyFor(am.accounts[0]));
+  am.accounts[0].status = 'error';
+  am.accounts[0]._deadRefreshToken = 'rt-a-1'; // the row still holds it: onAccountError goes on to empty it
+  sync.api = async (method, path, params, opts) => {
+    const r = await store.api(method, path, params, opts);
+    return path === `User/Credential/${row.User_Credential__}:lock` ? { ...r, Data: JSON.stringify(foreignBlob(T0 + 16 * H)) } : r;
+  };
+  assert.equal(await sync.onAccountError(am.accounts[0]), false);
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.equal(store.blob(syncKeyFor(am.accounts[0])).refreshToken, 'rt-a-1', 'not emptied');
+  assert.equal(row.Locked, null, 'released');
+});
+
+test('emptying a rejected token: a lock that answers for another key is not written to', async () => {
+  const { sync, am, store } = setup([claude('a')]);
+  await sync.sync();
+  const row = store.byKey(syncKeyFor(am.accounts[0]));
+  am.accounts[0].status = 'error';
+  am.accounts[0]._deadRefreshToken = 'rt-a-1';
+  sync.api = async (method, path, params, opts) => {
+    const r = await store.api(method, path, params, opts);
+    return path === `User/Credential/${row.User_Credential__}:lock` ? { ...r, Key: `${KEY_PREFIX}anthropic.someone-else.org` } : r;
+  };
+  await sync.onAccountError(am.accounts[0]);
+  assert.equal(store.blob(syncKeyFor(am.accounts[0])).refreshToken, 'rt-a-1', 'not emptied');
+  assert.equal(row.Locked, null, 'released');
+});
+
+test('an account with no identity: a row under its key holding another account\'s token is not taken', async () => {
+  // Its row is found by the refresh token it holds, so only the key can say
+  // whose tokens the row now carries.
+  const store = makeStore();
+  const a = claude('a');
+  store.put(syncKeyFor(a), encodeBlob({ ...a, credential: a.accessToken }, { accessToken: a.accessToken, refreshToken: a.refreshToken, expiresAt: a.expiresAt }, { now: T0, by: 'office' }));
+  const { sync, am, refreshed } = setup([{ ...a, accountUuid: undefined, orgUuid: undefined }], { store });
+  const row = store.byKey(syncKeyFor(a));
+  sync.api = async (method, path, params, opts) => {
+    const r = await store.api(method, path, params, opts);
+    return path === `User/Credential/${row.User_Credential__}:lock` ? { ...r, Data: JSON.stringify(foreignBlob(T0 + 16 * H)) } : r;
+  };
+  await am.ensureTokenFresh(0, true);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-1');
+  assert.equal(row.Locked, null);
+});
+
+test('a row keyed by the organization\'s name and written since with its uuid is still this account\'s', async () => {
+  // Found by identity (_rowFor), then written by an install that knows the
+  // orgUuid: the key no longer derives from the blob, and the row is still ours.
+  const store = makeStore();
+  const byName = { ...claude('a'), orgUuid: undefined };
+  const theirs = { ...claude('a'), credential: 'at-a-office', refreshToken: 'rt-a-office', expiresAt: T0 + 16 * H };
+  store.put(syncKeyFor(byName), encodeBlob(theirs, tokensOf(theirs), { now: T0, by: 'office' }));
+  assert.notEqual(syncKeyFor(byName), syncKeyFor(claude('a')));
+  const { am, refreshed } = setup([claude('a')], { store });
+  await am.ensureTokenFresh(0, true);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-office', 'adopted under its lock');
+});
+
 test('an account the store has never seen gets its row first, and is renewed under that row\'s lock', async () => {
   const { am, store, refreshed, sent } = setup([claude('a')]);
   // No pass has run: the row does not exist.
