@@ -635,6 +635,41 @@ test('not the owner and the row holds a different token that has expired too: no
   assert.ok(logs.some((l) => /does not own the pool/.test(l)), logs.join('\n'));
 });
 
+test('not the owner, our token just rejected and the row holds that same token: it is not taken back', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() + 8 * H })]);
+  const { sync, am, refreshed, logs } = t;
+  await sync.sync(); // the row holds this install's own token, which the clock still calls good
+  notOwner(t, am.accounts[0], null);
+  await am.ensureTokenFresh(0, true);
+  assert.deepEqual(refreshed, []);
+  assert.ok(!logs.some((l) => /taking the token/.test(l)), logs.join('\n'));
+  assert.ok(logs.some((l) => /does not own the pool.*waits for the lock/.test(l)), logs.join('\n'));
+});
+
+test('not the owner and the row holds another install\'s token that expires before ours: not taken, ours is the newer', async () => {
+  const t = setup([claude('a', { expiresAt: Date.now() + 2 * 60_000 })]);
+  const { sync, am, refreshed } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: Date.now() + 60_000 };
+  notOwner(t, am.accounts[0], published);
+  await am.ensureTokenFresh(0);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-1', 'kept: going back to the earlier one would be a step back');
+});
+
+test('not the owner, our token just rejected: a working token on the row is taken even if it expires before ours', async () => {
+  // As under the lock (see "earlier expiry: still adopted"): ours no longer
+  // works, so refusing the row's would fail the request for certain.
+  const t = setup([claude('a', { expiresAt: Date.now() + 8 * H })]);
+  const { sync, am, refreshed } = t;
+  await sync.sync();
+  const published = { ...am.accounts[0], credential: 'at-a-owner', refreshToken: 'rt-a-owner', expiresAt: Date.now() + 7 * H };
+  notOwner(t, am.accounts[0], published);
+  await am.ensureTokenFresh(0, true);
+  assert.deepEqual(refreshed, []);
+  assert.equal(am.accounts[0].credential, 'at-a-owner');
+});
+
 test('an account the store has never seen gets its row first, and is renewed under that row\'s lock', async () => {
   const { am, store, refreshed, sent } = setup([claude('a')]);
   // No pass has run: the row does not exist.
