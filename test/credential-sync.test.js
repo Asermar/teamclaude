@@ -864,6 +864,30 @@ test('a row keyed by the organization\'s name and written since with its uuid is
   assert.equal(am.accounts[0].credential, 'at-a-office', 'adopted under its lock');
 });
 
+test('a token renewed here is not written over another account\'s row under its key', async () => {
+  const store = makeStore();
+  store.put(syncKeyFor(claude('a')), foreignBlob(T0 - H));
+  const before = store.byKey(syncKeyFor(claude('a'))).Data;
+  const { sync, logs } = setup([claude('a')], { store });
+  await sync.sync(); // the pass leaves it alone too; the row is now cached
+  await sync.onLocalTokens(0, { accessToken: 'at-a-2', refreshToken: 'rt-a-2', expiresAt: T0 + 16 * H });
+  assert.equal(store.byKey(syncKeyFor(claude('a'))).Data, before);
+  assert.equal(store.rows.size, 1, 'nor a row made instead');
+  assert.ok(logs.some((l) => /row for the new token for "a" holds another account's tokens/.test(l)), logs.join('\n'));
+});
+
+test('an account removed here does not tombstone another account\'s row under its key', async () => {
+  const store = makeStore();
+  store.put(syncKeyFor(claude('a')), foreignBlob(T0 + 16 * H));
+  const before = store.byKey(syncKeyFor(claude('a'))).Data;
+  const { sync, am, settled, logs } = setup([claude('a')], { store });
+  await sync.sync();
+  am.removeAccount(0);
+  assert.deepEqual(await settled(), [false]);
+  assert.equal(store.byKey(syncKeyFor(claude('a'))).Data, before, 'no tombstone written');
+  assert.ok(logs.some((l) => /row to mark removed for "a" holds another account's tokens/.test(l)), logs.join('\n'));
+});
+
 test('an account the store has never seen gets its row first, and is renewed under that row\'s lock', async () => {
   const { am, store, refreshed, sent } = setup([claude('a')]);
   // No pass has run: the row does not exist.

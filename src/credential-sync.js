@@ -566,6 +566,10 @@ export class CredentialSync {
     if (!await this.isSignedIn()) return;
     try {
       const row = this._rowFor(account);
+      if (row && !this._isRowOf(row, row, account)) {
+        this._foreignRow(account, 'for the new token');
+        return;
+      }
       if (row?.deletedAt != null) return; // removed elsewhere; a refresh does not bring it back, a sign-in (storeSignIn) does
       if (row?.blob && row.blob.accessToken === tokens.accessToken) return;
       // The store is ahead; the next pass brings it here. An emptied row is
@@ -681,7 +685,12 @@ export class CredentialSync {
       if (!this.rows.size) this.rows = await this._list();
       let row = this._rowFor(account);
       if (!row) return false;
-      row = rowOf(await this.api('GET', `User/Credential/${row.id}`));
+      const read = rowOf(await this.api('GET', `User/Credential/${row.id}`));
+      if (!this._isRowOf(read, row, account)) {
+        this._foreignRow(account, 'to mark removed');
+        return false;
+      }
+      row = read;
       this.rows.set(row.key, row);
       if (row.deletedAt != null) return false;
       const stone = tombstone(this.now());
