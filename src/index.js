@@ -334,6 +334,12 @@ async function serverCommand() {
 
   // --activity-log <file>
   const activityLogPath = argValue('--activity-log') || null;
+  // `-` is stdout, which the TUI owns: refused rather than written as a file
+  // named "-" in the working directory.
+  if (activityLogPath === '-' && tuiExpected) {
+    console.error('--activity-log - writes to stdout and needs --headless.');
+    process.exit(1);
+  }
 
   // An empty pool is a configuration error — unless this install is signed in
   // to callback.net, where the credential store may hold the accounts: a fresh
@@ -770,10 +776,17 @@ async function serverCommand() {
 
   // In headless mode, wire activity-log writes directly via hooks + console.
   if (!tui && activityLogPath) {
+    // `-` is stdout, for a supervised daemon whose journal is the log. The
+    // console already goes there, so in that mode only the request lines are
+    // written: teeing the console as well would print every one of its lines
+    // twice.
+    const toStdout = activityLogPath === '-';
     // 0600, matching the request log and the config (see tui.js for why).
-    const aStream = createWriteStream(activityLogPath, { flags: 'a', mode: 0o600 });
+    const aStream = toStdout ? process.stdout : createWriteStream(activityLogPath, { flags: 'a', mode: 0o600 });
     aStream.on('error', err => process.stderr.write(`[TeamClaude] activity log error: ${err.message}\n`));
-    const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+    // Date and zone, not just the time: a log that outlives a day has to say
+    // which day a line belongs to.
+    const ts = () => new Date().toISOString();
     const writeActivity = msg => {
       // Strip [TeamClaude] prefix to match TUI behaviour. Sanitized because a
       // log line is one line: a value carrying a newline would otherwise write
@@ -791,7 +804,10 @@ async function serverCommand() {
     };
     hooks.onRequestRouted = (id, info) => {
       const r = inFlight.get(id);
-      if (r) r.account = info.account;
+      if (!r) return;
+      // Routed once per attempt: an account it leaves behind is a retry.
+      if (r.account && r.account !== info.account) (r.retriedFrom ??= []).push(r.account);
+      r.account = info.account;
     };
     hooks.onRequestEnd = (id, info) => {
       const r = inFlight.get(id);
@@ -805,14 +821,20 @@ async function serverCommand() {
       const sid = info.sessionId ? `${info.sessionId.slice(0, 6)} ` : '';
       const client = (info.client || r?.client) ? `[${info.client || r.client}] ` : '';
       const pin = (info.pinned || r?.pinned) ? ' [pin]' : '';
-      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${pin} (${info.status}, ${dur}s)`);
+      // Every account the request left behind, including the last one tried
+      // when it ended on none at all.
+      const from = [...(r?.retriedFrom ?? []), ...(r?.account && r.account !== acct ? [r.account] : [])];
+      const retry = from.length ? ` [retry from ${from.join(', ')}]` : '';
+      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${retry}${pin} (${info.status}, ${dur}s)`);
     };
-    // Tee console output to the activity log as well
-    const origLog = console.log;
-    const origErr = console.error;
-    console.log = (...a) => { const m = a.join(' '); origLog(m); writeActivity(m); };
-    console.error = (...a) => { const m = a.join(' '); origErr(m); writeActivity(m); };
-    process.on('exit', () => aStream.end());
+    if (!toStdout) {
+      // Tee console output to the activity log as well
+      const origLog = console.log;
+      const origErr = console.error;
+      console.log = (...a) => { const m = a.join(' '); origLog(m); writeActivity(m); };
+      console.error = (...a) => { const m = a.join(' '); origErr(m); writeActivity(m); };
+      process.on('exit', () => aStream.end());
+    }
   }
 
   // Expose reload to the proxy's control endpoint (works with or without TUI).
@@ -2815,7 +2837,8 @@ Options:
   --json JSON         Import from inline JSON (import), e.g.:
                       --json '{"accessToken":"...","refreshToken":"...","expiresAt":1234}'
   --log-to DIR        Log requests/responses to DIR (server, one file per request)
-  --activity-log FILE Append TUI activity lines to FILE (server; works in headless mode too)
+  --activity-log FILE Append TUI activity lines to FILE (server; works in headless mode too;
+                      '-' writes the request lines to stdout, --headless only)
   --headless          Run the server without the interactive TUI (for backgrounding)
   --no-mitm           (run) skip the forward proxy; route via ANTHROPIC_BASE_URL only
   --auto-fallback     (run) if the proxy is down, launch claude directly instead
