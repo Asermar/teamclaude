@@ -786,7 +786,7 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
         // switch is the only account change that happens invisibly — on exactly
         // the background-service deployment this endpoint exists for.
         console.log(`[TeamClaude] Switched to account "${safeLine(name, 64)}" (manual)`
-          + (eligible ? '' : ` — ${reason}, so rotation will not use it`));
+          + (eligible ? '' : ` — ${safeLine(reason, 200)}, so rotation will not use it`));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, account: name, eligible, ...(reason ? { reason } : {}) }));
         return;
