@@ -731,6 +731,20 @@ export class CredentialSync {
           if (!row) return this._standDown(account, force, 'its callback.net row went away');
           continue;
         }
+        if (err?.token === 'error_not_owner') {
+          // Fork-only (OkoTeamClaude): another install owns the account's pool.
+          // This one never renews it, but may use what the owner has published:
+          // read the row again rather than wait for the next pass.
+          const why = `this install does not own the pool (${safeLine(err?.message || String(err), 160)})`;
+          let r;
+          try { r = rowOf(await this.api('GET', `User/Credential/${row.id}`)); } catch { return this._standDown(account, force, why); }
+          this.rows.set(r.key, r);
+          if (r.deletedAt == null && heldElsewhere(r.blob, account, this.by) && !isTokenExpired(/** @type {Blob} */ (r.blob).expiresAt)) {
+            this.log(`[TeamClaude] Account "${name}": not the pool's owner; taking the token ${safeLine(/** @type {Blob} */ (r.blob).by, 48)} published`);
+            return tokensOf(/** @type {Blob} */ (r.blob));
+          }
+          return this._standDown(account, force, why);
+        }
         if (err?.token !== 'error_credential_locked') {
           // A lock call that failed in flight may still have taken it; either
           // way this install does not hold it, so it does not renew.
