@@ -11,7 +11,7 @@ import {
 import { configIndexFor, managerAccountFor, markAccountRemoved, markAccountAdded } from './account-pairing.js';
 import { PROVIDERS, providerOf, isSubscriptionAccount, upstreamFor } from './provider.js';
 import { mintAccountId } from './account-id.js';
-import { formatPercent, heldResetCredits, showSessionRow } from './status-renderer.js';
+import { formatPercent, heldResetCredits, showSessionRow, showWeeklyRow } from './status-renderer.js';
 import { resolveMaxUsage, resolveMaxSpendMinor, switchThresholdDiffs, modelLabel, EFFORT_SEP } from './model.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, describeSelfProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy, localListener, isSelfProxy } from './upstream-proxy.js';
 import { describeRouting, parseRoutingUrl, routingToUrl, checkRouting } from './account-routing.js';
@@ -3203,8 +3203,10 @@ export class TUI {
     // width (bar + `  Wk ` + bar) so the row still ends where its neighbours do.
     const weeklyOnly = !weeklyFirst && showBoth && category === 'unified'
       && providerOf(a) === 'codex' && !showSessionRow(q) && q.unified7d != null;
+    // The mirror case: a plan with no shared weekly window (a Team seat).
+    const sessionOnly = !weeklyFirst && showBoth && category === 'unified' && !showWeeklyRow(q);
     if (weeklyFirst || weeklyOnly) [l1, r1, t1, w1, th1] = [l2, r2, t2, w2, th2];
-    const bw1 = weeklyOnly ? bw * 2 + 6 : bw;
+    const bw1 = (weeklyOnly || sessionOnly) ? bw * 2 + 6 : bw;
 
     // Keep the optional chaining: _renderAcct is called on instances built
     // without a config, and it read none before this line existed.
@@ -3212,7 +3214,7 @@ export class TUI {
 
     let line = ` ${sel}${cur} ${startSlot}${name} ${type}${status} ${l1} ${bar(r1, bw1, t1, w1, th1, pctInBar)}`;
     if (showBoth) {
-      if (!weeklyFirst && !weeklyOnly) line += `  ${l2} ${bar(r2, bw, t2, w2, th2, pctInBar)}`;
+      if (!weeklyFirst && !weeklyOnly && !sessionOnly) line += `  ${l2} ${bar(r2, bw, t2, w2, th2, pctInBar)}`;
       // A backend's monthly window has no unified slot; it draws its own bar
       // and is budgeted as a family column, like S7/F7.
       if (showFamily && backendWindows?.monthly != null && l2 !== 'Mon') {
