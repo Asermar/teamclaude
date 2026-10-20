@@ -2916,6 +2916,9 @@ export async function peekStreamFailure(stream, bounds = {}) {
  * so it is advised only when the endpoint rejected the refresh token itself, and
  * for a refusal with no failed renewal behind it, with the status upstream
  * actually answered.
+ * @param {{ accounts: Record<string, any>[] }} accountManager
+ * @param {Set<string>} rejected  the refused accounts' names
+ * @param {Map<string, number>|undefined} statuses  the status each one got
  */
 function refusalMessage(accountManager, rejected, statuses) {
   const parts = [...rejected].map((name) => {

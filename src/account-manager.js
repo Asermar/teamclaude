@@ -461,6 +461,10 @@ function makeAccount(acct, index, listener = null) {
     // persisted, so false at every launch, and false again whenever tokens
     // arrive from elsewhere (updateAccountTokens).
     _minted: false,
+    // Why the last token refresh failed ({ at, reason, status }), until one
+    // succeeds or tokens arrive from elsewhere: the client is told this when
+    // the account is then refused (server.js refusalMessage). Never persisted.
+    _lastRefreshFailure: /** @type {{ at: number, reason: string, status: any } | null} */ (null),
   };
 }
 
@@ -5085,6 +5089,8 @@ export class AccountManager {
     account.expiresAt = expiresAt;
     // Tokens from elsewhere (the store, a reload from disk) were not minted here.
     account._minted = false;
+    // A failed renewal of the tokens these replace no longer explains anything.
+    account._lastRefreshFailure = null;
     if (account.status === 'error') account.status = 'active';
     console.log(`[TeamClaude] Updated tokens for account "${safeLine(account.name, 64)}"`);
     this._onTokenRefresh?.(accountIndex, {
