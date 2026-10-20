@@ -470,6 +470,10 @@ function makeAccount(acct, index, listener = null) {
     // persisted, so false at every launch, and false again whenever tokens
     // arrive from elsewhere (updateAccountTokens).
     _minted: false,
+    // Why the last token refresh failed ({ at, reason, status }), until one
+    // succeeds or tokens arrive from elsewhere: the client is told this when
+    // the account is then refused (server.js refusalMessage). Never persisted.
+    _lastRefreshFailure: /** @type {{ at: number, reason: string, status: any } | null} */ (null),
   };
 }
 
@@ -4976,12 +4980,16 @@ export class AccountManager {
         account.expiresAt = newTokens.expiresAt;
         account._lastRefreshAt = Date.now();
         account._deadRefreshToken = null; // this token works; clear any stale guard
+        account._lastRefreshFailure = null;
         // Set before the listener runs: it is what lets the sync store them.
         account._minted = minted;
         console.log(`[TeamClaude] Token refreshed for account "${safeLine(account.name, 64)}"`);
         this._onTokenRefresh?.(accountIndex, newTokens);
       } catch (/** @type {any} */ err) {
         console.error(`[TeamClaude] Token refresh failed for "${safeLine(account.name, 64)}": ${err.message}`);
+        // Why, until a refresh succeeds: what the client is told when this
+        // account then fails its request (the coordinator's reason, a 429).
+        account._lastRefreshFailure = { at: Date.now(), reason: safeLine(String(err?.message || err), 300), status: err?.status };
         // The refresh never reached the token endpoint: the account's own
         // routing proxy is down. The forward that follows would fail the same
         // way, so hold the account out of rotation now rather than after it.
@@ -5118,6 +5126,8 @@ export class AccountManager {
     account.expiresAt = expiresAt;
     // Tokens from elsewhere (the store, a reload from disk) were not minted here.
     account._minted = false;
+    // A failed renewal of the tokens these replace no longer explains anything.
+    account._lastRefreshFailure = null;
     if (account.status === 'error') account.status = 'active';
     console.log(`[TeamClaude] Updated tokens for account "${safeLine(account.name, 64)}"`);
     this._onTokenRefresh?.(accountIndex, {
