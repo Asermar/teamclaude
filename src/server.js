@@ -2914,9 +2914,11 @@ export async function peekStreamFailure(stream, bounds = {}) {
  * could not be renewed. 503 with a short Retry-After: the renewal may go through
  * on the next request (the lock freed, the token endpoint back). Never a 401 or
  * a 403 — the client's own credential is fine.
+ * @param {import('node:http').ServerResponse} res
+ * @param {Record<string, any>} ctx
  */
 function respondUnrenewed(res, ctx) {
-  const names = [...ctx.unrenewed].map(n => `"${n}"`).join(', ');
+  const names = [...ctx.unrenewed].map((/** @type {string} */ n) => `"${safeLine(n, 64)}"`).join(', ');
   ctx.status = 503;
   ctx.account = `(${[...ctx.unrenewed].join(', ')} not renewed)`;
   if (!res.headersSent) {
@@ -3186,7 +3188,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   if (account.type === 'oauth' && account.refreshToken && !account.upstream && isTokenExpired(account.expiresAt)) {
     (ctx.unrenewed ??= new Set()).add(account.name);
     ctx.tried.add(account.index);
-    console.error(`[TeamClaude] "${account.name}": token expired and not renewed; not sending it upstream`);
+    console.error(`[TeamClaude] Account "${safeLine(account.name, 64)}": token expired and not renewed; not sending it upstream`);
     if (ctx.pinnedIndex == null && retryCount < maxRetries) {
       return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
     }
