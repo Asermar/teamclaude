@@ -459,6 +459,9 @@ function makeAccount(acct, index, listener = null) {
     // The refresh token upstream last rejected as invalid, if it is still the
     // one we hold — see the dead-token guard in ensureTokenFresh.
     _deadRefreshToken: null,
+    // Until when (epoch ms) the token endpoint asked, with a 429, not to be
+    // asked again for this account — see ensureTokenFresh.
+    _refreshHeldUntil: /** @type {number|null} */ (null),
     // Whether the token it holds was minted by the token endpoint for this
     // process — a renewal here, not one taken from the store. Only such a token
     // is fresh enough to store on callback.net (credential-sync.js). Never
@@ -4968,8 +4971,9 @@ export class AccountManager {
         // what kept accounts wrongly "errored" after a momentary refresh blip.
         if (err.status === 429) {
           const holdMs = Number.isFinite(err.retryAfterMs) ? err.retryAfterMs : REFRESH_429_HOLD_MS;
-          account._refreshHeldUntil = Date.now() + holdMs;
-          console.error(`[TeamClaude] Account "${safeLine(account.name, 64)}": the token endpoint asked to wait (429); no refresh before ${new Date(account._refreshHeldUntil).toISOString()}`);
+          const until = Date.now() + holdMs;
+          account._refreshHeldUntil = until;
+          console.error(`[TeamClaude] Account "${safeLine(account.name, 64)}": the token endpoint asked to wait (429); no refresh before ${new Date(until).toISOString()}`);
         }
         const isAuthRejection = err.status === 400 || err.status === 401 || err.status === 403;
         if (isAuthRejection) {
