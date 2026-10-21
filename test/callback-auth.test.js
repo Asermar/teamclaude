@@ -436,7 +436,7 @@ test('a CALLBACK_API_BASE that is set but not acceptable sends nothing, to the d
   try {
     const err = await callbackApi('GET', 'User/Credential', null, {
       accessToken: 'our-token',
-      fetchImpl: async (url, init) => { sent.push(String(url)); return new Response('{"result":"success","data":[]}'); },
+      fetchImpl: async (url) => { sent.push(String(url)); throw new TypeError('fetch failed'); },
     }).catch((e) => e);
     assert.ok(err instanceof Error, 'the call is refused');
     assert.match(err.message, /CALLBACK_API_BASE/);
