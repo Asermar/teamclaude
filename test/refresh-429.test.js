@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
-import { refreshAccessToken } from '../src/oauth.js';
+import { refreshAccessToken, parseRetryAfterMs } from '../src/oauth.js';
 
 // A 429 from the token endpoint is the endpoint asking to be left alone. A forward
 // with an expired token asks for a refresh, its 401 forces another, and the retry
@@ -34,14 +34,30 @@ function rateLimited(retryAfterMs) {
   return e;
 }
 
+test('parseRetryAfterMs reads delta-seconds and an HTTP date, and nothing else', () => {
+  const now = Date.parse('2026-10-13T00:00:00Z');
+  assert.strictEqual(parseRetryAfterMs('120', now), 120_000);
+  assert.strictEqual(parseRetryAfterMs(' 7 ', now), 7_000);
+  assert.strictEqual(parseRetryAfterMs('Tue, 13 Oct 2026 00:01:00 GMT', now), 60_000);
+  assert.strictEqual(parseRetryAfterMs('Mon, 12 Oct 2026 23:00:00 GMT', now), 0, 'a date past is no wait');
+  for (const v of [undefined, null, '', '  ', 'soon']) assert.strictEqual(parseRetryAfterMs(v, now), undefined, `${v}`);
+});
+
 test('refreshAccessToken reports a 429 with its Retry-After, in seconds or as a date, and is not retried', async () => {
-  for (const [header, expected] of [['120', 120_000], [new Date(Date.now() + 60_000).toUTCString(), 60_000], [undefined, undefined], ['soon', undefined]]) {
+  // The date is an hour out: what is left of it by the time it is parsed
+  // depends on the clock, so only its bounds are checked.
+  const inAnHour = new Date(Date.now() + 3600_000).toUTCString();
+  for (const [header, check] of [
+    ['120', (ms) => ms === 120_000],
+    [inAnHour, (ms) => ms > 0 && ms <= 3600_000],
+    [undefined, (ms) => ms === undefined],
+    ['soon', (ms) => ms === undefined],
+  ]) {
     const { srv, endpoint, hits } = await tokenServer(429, header === undefined ? {} : { 'retry-after': header });
     try {
       const err = await refreshAccessToken('r', endpoint).catch((e) => e);
       assert.strictEqual(err.status, 429);
-      if (expected === undefined) assert.strictEqual(err.retryAfterMs, undefined, `${header}`);
-      else assert.ok(Math.abs(err.retryAfterMs - expected) < 2000, `${header} -> ${err.retryAfterMs}`);
+      assert.ok(check(err.retryAfterMs), `${header} -> ${err.retryAfterMs}`);
       assert.strictEqual(hits(), 1, 'a 429 is not retried inside the call');
     } finally {
       srv.close();

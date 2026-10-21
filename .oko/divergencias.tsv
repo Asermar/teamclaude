@@ -1,0 +1,30 @@
+# Inventario de lo que este fork (rama okodex) lleva y upstream (KarpelesLab/teamclaude) no.
+#
+# Mismo formato que el de fs-claude-plugin (.oko/divergencias.tsv), que es el que lee
+# claude-dist (mod/plugins.sh, FORK_INVENTARIO_REL): así un evaluador puede cruzarlo con
+# GitHub sin otro formato. Las columnas `plugins` y `privado` no aplican aquí y van con `-`.
+#
+# Sólo se declara lo que no se puede deducir: el PR y NUESTRA decisión. El estado del PR es
+# observable en GitHub y no se copia. La unidad es la DIVERGENCIA, no el commit: la unión
+# de la columna `commits` tiene que cubrir los commits no-merge de `upstream..okodex`. Los
+# merges están exentos, y también un commit que sólo toque `.oko/` (entrada oko-inventario).
+#
+# Estados:
+#   vigente     está en el fork y se queda; si tiene PR, sigue vivo
+#   permanente  upstream lo rechazó y aquí se queda para siempre: NO volver a preguntar
+#   retirado    ya lo quitamos, y el asunto dice por qué
+#
+# Criterio (decisión de Alexis, 21-oct-2026): tan cerca de upstream como se pueda;
+# divergir sólo en lo que necesitamos y upstream no acepta o ya rechazó.
+#
+# nombre	commits	pr	estado	plugins	privado	asunto
+primera-renovacion-con-cerrojo	400bb5f9d246	https://github.com/KarpelesLab/teamclaude/issues/554	retirado	-	-	una renovación sin fila crea una y renueva bajo su cerrojo. RETIRADO al integrar v1.1.26: upstream cerró #554 con #571 por otro camino, una fila de reserva con la identidad y sin token. Se toma lo suyo
+reintento-del-429	046d8db24b79	https://github.com/KarpelesLab/teamclaude/pull/551	retirado	-	-	un 429 del servidor de tokens retiene las renovaciones de la cuenta durante su Retry-After. RETIRADO: aceptado en upstream (#551)
+sin-reenvio-caducado	b6eeaa171732	https://github.com/KarpelesLab/teamclaude/pull/552	retirado	-	-	un token caducado cuya renovación falló no se reenvía. RETIRADO: aceptado en upstream (#552)
+causa-del-error	fe6b9d3e8b58,f1d977f6b43b	https://github.com/KarpelesLab/teamclaude/pull/553	retirado	-	-	el error al cliente nombra por qué falló la cuenta, no un re-login fijo. RETIRADO: aceptado en upstream (#553)
+retry-after-sin-renovar	cbdbe5c17020	-	vigente	-	-	la 503 de «no se pudo renovar» lleva el Retry-After del servidor de tokens y no 30 s fijos. Candidata a upstream: rama fix/unrenewed-retry-after (ae809ae) preparada sobre v1.1.26, SIN abrir el PR
+callback-base-invalida	6b6eb3e2dc6a	-	vigente	-	-	una TEAMCLAUDE_CALLBACK_API_BASE inaceptable se rechaza en vez de sustituirse por callback.net, que recibiría el token. Candidata a upstream: rama fix/callback-base-refuse-1.1.26 (5f4e8c9) preparada sobre v1.1.26, SIN abrir el PR
+marca-enviado	11e47322385a,de3cdc7adeb4,bdb110bae9a9	-	vigente	-	-	la renovación pide al almacén la marca «enviado» (:sending, sent:false) antes de salir. No se propone: necesita una API que callback.net no tiene, y es propia de OkoTeamClaude (juicio inferido, no preguntado a upstream)
+registro-de-actividad	91fe94d72bd3,8124a134b533,341ca68d6522,fd4398174aa9,151405bfb861,57cee32bc592	-	vigente	-	-	--activity-log - escribe en stdout líneas con fecha y el cambio de cuenta; las líneas del daemon acotan los nombres de cuenta con safeLine. Posible candidata (diagnóstico, en el alcance de CONTRIBUTING), pero es una función nueva: según CONTRIBUTING, antes va un issue. Los safeLine dependen de 8124a13 y no se separan sin reescribir
+no-duena-relee	aa7e5834f2c2,7c460cdbca39,b3dbff45c5cf,f64414dfd9e3,7040d84fcb82,3d0b1d44accc,7e38ae0d08e7	-	vigente	-	-	ante error_not_owner (OkoTeamClaude) la instalación relee la fila y adopta lo publicado; y ninguna fila de otra cuenta se adopta ni se escribe. Lo primero es propio del almacén de la casa (juicio inferido). Lo segundo (7040d84, 3d0b1d4, 7e38ae0) es endurecimiento general, pero está entrelazado con lo primero: separarlo es reescribirlo
+oko-inventario	-	-	vigente	-	-	este inventario: es nuestro por definición y no tiene PR que abrir. Va como vigente y no como permanente porque upstream no lo ha rechazado: nunca se le ha propuesto
