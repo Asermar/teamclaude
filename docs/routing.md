@@ -9,7 +9,7 @@ How TeamClaude decides which account serves a request, and what it does when tha
 3. OAuth tokens expiring within 5 minutes are automatically refreshed and persisted to config.
 4. Rate limit headers from the API (`anthropic-ratelimit-unified-*`) track session (5h) and weekly (7d) quota utilization.
 5. When usage reaches the threshold, the proxy switches to the best available account (see [Choosing an account](#choosing-an-account)).
-6. On 429 responses, the proxy waits the `retry-after` duration and retries; on persistent errors, it switches accounts.
+6. On retryable 429 responses, the proxy uses the quota or throttle rules below. An upstream 429 with `x-should-retry: false` and no spent quota window goes straight to the client.
 7. Transient network errors (connection reset, timeout) drop the connection so the client can retry.
 8. If all accounts are exhausted, returns 429 with the soonest reset time — or, with [`holdSeconds`](quota.md#hold-on-exhaustion) set, holds the connection open and retries silently until an account recovers.
 9. Client token refresh requests (`/v1/oauth/token`) are relayed to upstream untouched — the proxy and client manage their own token lifecycles independently.
@@ -23,6 +23,8 @@ When it does have to pick, ranking is: lowest `priority` number first, then, amo
 ## The two kinds of 429
 
 Reacting the wrong way to either one makes things worse, so they are handled separately.
+
+- An upstream **`429` with `x-should-retry: false`** is an explicit refusal of this request. TeamClaude returns its original status, body, and allowed response headers, even if `retry-after` is present. A 429 that also marks a quota window spent (`5h`, `7d` or `7d_oi` status `rejected`, or a spent Codex window) is still a quota rejection and switches accounts as below. It does not retry, switch accounts, or pause the account: unrelated requests can still use it. The client decides what to do with the refusal.
 
 - A **quota rejection** (a spent 5h or weekly bucket, `unified-…-status: rejected`) switches accounts immediately.
 - A **rate-limit 429** (the per-minute throttle) does **not** switch. It pauses the account so concurrent requests wait instead of flooding, retries the same account (absorbing short `retry-after`s inline, default ≤ 60s via `TEAMCLAUDE_RATE_LIMIT_ABSORB_MAX_SECONDS`), and only surfaces a 429 to the client for longer waits.
@@ -219,6 +221,16 @@ The `sess` in both lines is the display's short label and counts **conversations
 
 With `expiryRouting.preempt` on, a governing-window **rollover** also ends the drain for the conversation whose account rolled, and it rejoins normal rotation there and then. The drain trades expiring quota for a warm prompt cache, and that trade is priced on the window the account had when the drain started; once that window has gained a full week the account is the one the fleet should be spending last. Nothing else bounds it — a conversation making requests never idles out — so without this a long-lived one rides a rolled-over account for as long as it keeps talking.
 
+### Load distribution
+
+```json
+"distributeSessions": "load"
+```
+
+The even mode counts conversations, and conversations are not interchangeable: an agent lane in a build-and-test loop sends a request every few seconds, an interactive session sends one a minute. On a pool of 14 Codex accounts with 24 even-placed sessions, one account was measured serving 31% of the requests and six were serving none. The `load` mode places each **new** conversation on the eligible account that served the **fewest requests in the last ten minutes** (`LOAD_WINDOW_MS`), then falls through to the even keys (fewest active conversations, fewest in-flight, expiry pressure, soonest reset) as tie-breaks. The conversation is then pinned exactly as in the other modes, so prompt caching is unaffected; only placement changes.
+
+The count is of requests the proxy forwarded, kept in a bounded ring per account and pruned on read, so it needs no probe and no persisted state; switching into `load` from another mode starts from the traffic of the last ten minutes. `teamclaude status` reports it per account as `recentRequests`. Like the even mode, `load` only moves traffic by placing new conversations: an existing skew drains as long-lived conversations end and are replaced.
+
 ## Expiry-pressure routing
 
 > **The config key `expiryRouting` is provisional.** [#176](https://github.com/KarpelesLab/teamclaude/issues/176) proposes a `routingStrategy` enum for the adjacent drain-concentration problem, and a strategy value such as `"expiry"` is a plausible home for this behaviour. The mechanism below is settled; only its spelling on disk is open, and it will follow whatever shape that discussion settles on.
@@ -286,6 +298,25 @@ Prefer the `accountUuid` (printed by `teamclaude accounts`) for anything scripte
 The rotation index is **not** accepted — it is array position, so deleting an account would silently repoint every later pin at a *different* account.
 
 > If you hold the *same* account in two orgs, a bare uuid or email matches the first one. `TC_ACCT=<accountUuid>/<orgUuid>` picks a specific one — rarely needed.
+
+### Move one running session
+
+`TC_ACCT` is chosen at launch. To move a session that is already running, without moving the rest of the fleet the way `teamclaude switch <account>` does, pin it by its session id:
+
+```bash
+# From inside the session (a `!` command): Claude Code exports $CLAUDE_CODE_SESSION_ID
+teamclaude switch api-1 --session
+
+# From anywhere else, naming the session
+teamclaude switch api-1 --session 3f2a1b9c-…
+
+# Back to following the fleet
+teamclaude switch --session --clear
+```
+
+The pin behaves like `TC_ACCT`: the session's requests go to that account only and never fail over, and an account that has since been removed is refused with a `404` rather than quietly replaced. A launch-time `TC_ACCT` pin wins over it. The account is accepted in every form `TC_ACCT` accepts and stored by name, so it follows a rename.
+
+It is runtime state, like `switch`: kept in the server's memory, gone on a restart, and forgotten once the session has been idle for an hour. `teamclaude status` lists the pinned sessions on its **Pinned** line, the dashboard in its summary, and the activity view marks their requests `[pin]`. The command warns when the proxy has not seen a request from that session id in the last hour, since a pin on an id no request carries pins nothing. A caller holding a [client key](configuration.md) is refused, as for the other control-plane writes. The command wraps `POST /teamclaude/session-pin` with `{"sessionId": "<id>", "account": "<name>"}`, where `"account": null` clears the pin.
 
 <details>
 <summary>Pinning without <code>teamclaude run</code> (<code>/tc-acct/</code>, deprecated)</summary>
