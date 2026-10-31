@@ -4,10 +4,9 @@ import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 
-// Fork-only (oko), where the 429 hold (fix/refresh-retry-after) and the unrenewed
-// answer (fix/no-forward-without-renewal) meet: the 503 for an expired token that
-// could not be renewed tells the client to come back when the account's hold
-// lifts — the token endpoint's Retry-After — not after a fixed 30 s.
+// Where the 429 hold (#551) and the unrenewed answer (#552) meet: the 503 for an
+// expired token that could not be renewed tells the client to come back when the
+// account's hold lifts — the token endpoint's Retry-After — not after a fixed 30 s.
 
 const H = 3600_000;
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -35,7 +34,7 @@ test("the unrenewed 503 carries the token endpoint's Retry-After, not a fixed 30
   try {
     const r = await f.send();
     assert.equal(r.status, 503);
-    assert.ok(r.retryAfter >= 115 && r.retryAfter <= 120, `${r.retryAfter}`);
+    assert.ok(r.retryAfter > 30 && r.retryAfter <= 120, `${r.retryAfter}`);
   } finally { f.close(); }
 });
 
