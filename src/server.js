@@ -1053,7 +1053,7 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null,
         const name = accountManager.accounts[index].name;
         accountManager.sessionPins.set(sessionId, name);
         const { eligible, reason } = accountManager.eligibility(index);
-        console.log(`[TeamClaude] Session ${shown} pinned to account "${name}" (manual)`
+        console.log(`[TeamClaude] Session ${shown} pinned to account "${safeLine(name, 64)}" (manual)`
           + (eligible ? '' : ` — ${reason}, so its requests will fail until that changes`));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, sessionId, account: name, seen, eligible, ...(reason ? { reason } : {}) }));
