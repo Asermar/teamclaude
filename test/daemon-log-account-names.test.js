@@ -182,3 +182,27 @@ test('a session pinned by hand does not split its line on an account name', asyn
     proxy.close();
   }
 });
+
+// The same line also prints why the pinned account is not eligible, and one
+// reason, being outranked, names ANOTHER account: the one that preempts it.
+test('a session pinned by hand to an outranked account does not split on the outranking name', async () => {
+  const am = new AccountManager([
+    { name: `first\n${MARK} a`, type: 'apikey', apiKey: 'k1', priority: 0 },
+    { name: 'second', type: 'apikey', apiKey: 'k2', priority: 1 },
+  ], 0.98);
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: 'http://127.0.0.1:9' });
+  const port = await listen(proxy);
+  try {
+    const lines = await captured(async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/teamclaude/session-pin`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'k' },
+        body: JSON.stringify({ sessionId: '3f2a1b9c-0000-4000-8000-000000000001', account: 'second' }),
+      });
+      assert.equal(res.status, 200, await res.text());
+    });
+    assertNotSplit(lines, 'outranked by higher-priority account');
+  } finally {
+    proxy.close();
+  }
+});
