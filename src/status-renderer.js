@@ -1,6 +1,7 @@
 import { formatMoney } from './oauth.js';
 import { findFamilyBlock, modelGlobOverlaps, gatingUtilization, resolveMaxUsage, resolveSwitchThreshold, resolveFleetThreshold, switchThresholdDiffs, resolveMaxSpendMinor, spendCapReached } from './model.js';
-import { safeLine } from './safe-text.js';
+import { safeLine, sanitizeText } from './safe-text.js';
+import { isRefused } from './account-refusal.js';
 import { ROUTE_COLORS } from './config-ops.js';
 import { describeRouting } from './account-routing.js';
 
@@ -55,6 +56,9 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   if (status.server?.startedAt || status.server?.uptimeSeconds != null) {
     lines.push(`${paint.dim('Server'.padEnd(12))} ${formatServerSummary(status.server, now)}`);
   }
+  // Only when the fleet runs out within the forecast horizon (#550).
+  const fleetForecast = fleetForecastText(status.fleetForecast, now);
+  if (fleetForecast) lines.push(`${paint.dim('Fleet'.padEnd(12))} ${paint.yellow(fleetForecast)}`);
   lines.push('');
 
   for (const line of routingLines(status.routes, blocked, paint)) lines.push(line);
@@ -80,6 +84,10 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     if (egress) lines.push(`  ${egress}`);
     const why = unavailableLine(account, paint);
     if (why) lines.push(`  ${why}`);
+    const denied = entitlementLine(account, now, paint);
+    if (denied) lines.push(`  ${denied}`);
+    const plan = subscriptionLostLine(account, paint, now);
+    if (plan) lines.push(`  ${plan}`);
     const spend = spendLine(account, paint);
     if (spend) lines.push(`  ${spend}`);
     const resetCredits = resetCreditLine(account, paint, now);
@@ -156,6 +164,7 @@ export const UNAVAILABLE_TEXT = {
   'advisor-capped': "advisor model's usage cap reached (maxUsage)",
   entitlement: 'upstream refused this account for the organization (cooldown)',
   routing: "the account's routing proxy is unreachable (cooldown)",
+  billing: 'upstream billing refused usage (cooldown); check billing or purchase credits',
   credential: 'upstream rejected its API key with a 401 (cooldown, then retried)',
   route: 'no route allows this account',
   'advisor-quota': "advisor model's weekly bucket spent",
@@ -183,7 +192,8 @@ export function spendLine(account, paint) {
   // The operator's own ceiling (accounts[].maxSpend), drawn beside the upstream
   // figure it is judged against so the two read in one glance: `$14.35 of
   // $10,000.00 used this month, cap $20.00`. Named `cap` like the usage caps on
-  // the bars above — same word, same meaning: at it the account gets nothing.
+  // the bars above: at it the account bills nothing more, and serves only what
+  // its included quota still covers.
   const capMinor = resolveMaxSpendMinor(account?.maxSpend, spend);
   const cap = capMinor == null ? '' : `, cap ${formatMoney({ ...spend, usedMinor: capMinor, limitMinor: null })}`;
   if (spend.enabled) {
@@ -246,6 +256,41 @@ export function outsideSpendText(outsideSpend) {
     return label + ': not observed (quota probe off?)';
   });
   return parts.join(' \u00b7 ');
+}
+
+/**
+ * The fleet forecast as one line, or null when there is none (#550):
+ *
+ *   "all accounts out in ~31h (weekly), first back 4h later"
+ *   "all accounts out now (5h), first back in 2h"
+ *
+ * Pure and closure-free on purpose, like forecastText: the dashboard
+ * serializes it into its page with toString().
+ *
+ * @param {{allOutAt?: number|null, firstBackAt?: number|null, boundBy?: string|null, ratePerDay?: number|null}|null|undefined} fleet
+ * @param {number} now  ms epoch
+ * @returns {string|null}
+ */
+export function fleetForecastText(fleet, now) {
+  if (!fleet || typeof fleet.allOutAt !== 'number') return null;
+  /** @param {number} ms */
+  var dur = function (ms) {
+    var minutes = Math.max(1, Math.round(ms / 60000));
+    if (minutes < 60) return minutes + 'm';
+    var hours = Math.round(minutes / 60);
+    if (hours < 48) return hours + 'h';
+    var days = Math.floor(hours / 24);
+    var rem = hours % 24;
+    return rem ? days + 'd' + rem + 'h' : days + 'd';
+  };
+  var out = fleet.allOutAt > now;
+  var bucket = fleet.boundBy === '5h' ? '5h' : 'weekly';
+  var text = 'all accounts out ' + (out ? 'in ~' + dur(fleet.allOutAt - now) : 'now') + ' (' + bucket + ')';
+  var back = fleet.firstBackAt;
+  if (typeof back === 'number' && back > now) {
+    text += out ? ', first back ' + dur(back - fleet.allOutAt) + ' later' : ', first back in ' + dur(back - now);
+  }
+  return text;
 }
 
 /**
@@ -397,13 +442,24 @@ export function heldResetCredits(quota, now = Date.now()) {
   return available;
 }
 
+// Upstream refused the account itself: its words, and its link when the
+// shortened words lost it.
+function refusalText(/** @type {Record<string, any>} */ err) {
+  const detail = safeLine(err.detail, 200);
+  const link = err.link && !detail.includes(err.link) ? ` ${sanitizeText(err.link)}` : '';
+  return `refused by upstream: ${detail}${link} — once resolved, run: ${safeLine(err.remedy, 40)}`;
+}
+
 export function unavailableLine(account, paint) {
   const reason = account?.unavailable;
   if (!reason) return null;
+  // A refusal outlasts a cap or a cooldown ranked above it, so it is named
+  // whatever `unavailable` says, short of the operator's own disable.
+  const refused = reason !== 'disabled' && isRefused(account);
   const err = reason === 'error' ? account.errorReason : null;
-  const text = err
-    ? `needs a re-login: ${safeLine(err.detail, 120)} — run: ${safeLine(err.remedy, 40)}`
-    : UNAVAILABLE_TEXT[reason] || safeLine(reason, 64);
+  const text = refused ? refusalText(account.errorReason)
+    : !err ? UNAVAILABLE_TEXT[reason] || safeLine(reason, 64)
+    : `needs a re-login: ${safeLine(err.detail, 120)} — run: ${safeLine(err.remedy, 40)}`;
   // An account serving as the extra-usage fallback reads as out of quota like
   // any other, yet is taking traffic and billing for it. Say so on the line
   // that would otherwise tell the operator it is idle.
@@ -411,6 +467,34 @@ export function unavailableLine(account, paint) {
     return `${paint.dim('Blocked'.padEnd(8))} ${paint.yellow(text)} ${paint.red('\u2014 serving on extra usage (paid overage), billing')}`;
   }
   return `${paint.dim('Blocked'.padEnd(8))} ${paint.yellow(text)}`;
+}
+
+// Upstream's refusal outlives its cooldown, so the account reads as denied
+// until it serves again rather than healthy between re-checks.
+/** @param {any} account @param {number} now @param {ReturnType<typeof colors>} paint */
+function entitlementLine(account, now, paint) {
+  const denial = account?.entitlementDenial;
+  if (!denial) return null;
+  const since = formatAgo(denial.since, now);
+  // The payload can come from another process: only a whole number is a count.
+  const count = Number.isSafeInteger(denial.count) ? denial.count : 1;
+  const when = count > 1 ? `${count} in a row, first ${since}` : since;
+  const text = safeLine(denial.detail ?? '', 200) || 'OAuth entitlement denied';
+  return `${paint.dim('Denied'.padEnd(8))} ${paint.yellow(text)} ${paint.dim(`\u2014 ${when}`)}`;
+}
+
+/**
+ * @param {any} account
+ * @param {any} paint
+ * @param {number} [now]
+ */
+export function subscriptionLostLine(account, paint, now = Date.now()) {
+  const lost = account?.subscriptionLost;
+  if (!lost) return null;
+  const since = parseTs(lost.since);
+  const when = since ? ` (since ${formatAgo(Math.min(since, now), now)})` : '';
+  const text = `its OAuth profile no longer shows the Claude ${safeLine(lost.plan, 16)} plan${when}`;
+  return `${paint.dim('Plan'.padEnd(8))} ${paint.yellow(text)} ${paint.gray('\u2014 renew the plan or disable the account')}`;
 }
 
 // Compact names for the "switch NN%" line below — short enough that several
@@ -646,28 +730,60 @@ function adaptiveFor(status, name) {
   return rows.find(r => r && typeof r === 'object' && nameText(r.name) === name) || null;
 }
 
+// The Codex quota windows a Codex account's adaptive score can come from. Codex
+// has no Claude family buckets, so its row names the window instead.
+const CODEX_WINDOW_LABELS = /** @type {Record<string, string>} */ ({ unified7d: 'weekly', unified5h: '5h' });
+
+// What an adaptive row says its score is measured against. A Codex row names its
+// own window ("codex weekly"); every other row names the Claude bucket, as it
+// always has. A row with no provider is an Anthropic one, from an older server.
+/** @param {any} a */
+function adaptiveLabel(a) {
+  if (a.provider !== 'codex') return bucketLabel(a.bucket);
+  return `codex ${CODEX_WINDOW_LABELS[a.window] || 'window'}`;
+}
+
+// The plan segment. A Codex account has no Claude multiplier, so its row names
+// the ChatGPT plan it reported, or says the plan is unknown when none was.
+/**
+ * @param {any} a
+ * @param {any} paint
+ */
+function adaptivePlan(a, paint) {
+  if (a.provider === 'codex') {
+    const plan = typeof a.planType === 'string' ? safeLine(a.planType, 32) : '';
+    return plan ? `plan ${plan}` : paint.dim('plan unknown');
+  }
+  return a.planWeight == null
+    ? paint.dim('plan unknown')
+    : `plan ${Number.isFinite(a.planWeight) ? a.planWeight : '?'}x`;
+}
+
 // "next · weight 62%  ·  3 sess / 1 inflight  ·  head 38.0% of 98%  ·  plan 20x
-//  ·  conc 6"
+//  ·  conc 6"; under scoring "pressure" the last three give way to "P 3.85e-6".
 //
 // `next` is the deterministic routing result. `weight` is the account's score
 // normalized across competitors, useful for explaining why it won without
 // misrepresenting the picker as a weighted random draw.
 function formatAdaptive(a, paint) {
   const parts = [];
-  const family = bucketLabel(a.bucket);
+  const family = adaptiveLabel(a);
   const prefix = a.next ? `${paint.green('next')} ${paint.dim('·')} ` : '';
   parts.push(a.weight == null
     // Every candidate scored zero: the whole tier is inside its reserve, so
     // there is no weight to report and saying "0%" everywhere would imply the
     // router had stopped, which it has not.
-    ? `${prefix}${paint.yellow(`weight n/a (all reserved, ${family})`)}`
+    ? `${prefix}${paint.yellow(`weight n/a (${a.scoring === 'pressure' ? 'all zero' : 'all reserved'}, ${family})`)}`
     : `${prefix}${paint.bold(`weight ${pct(a.weight, 0)} of ${family}`)}`);
   parts.push(`${num(a.sessions)} sess / ${num(a.inFlight)} inflight`);
-  parts.push(`head ${pct(a.headroom, 1)} of ${pct(a.threshold, 0)}`);
-  parts.push(a.planWeight == null
-    ? paint.dim('plan unknown')
-    : `plan ${Number.isFinite(a.planWeight) ? a.planWeight : '?'}x`);
-  parts.push(`conc ${num(a.concCap, 1)}`);
+  if (a.scoring === 'pressure') {
+    // The score is P over load: no head, plan weight or concurrency cap went into it.
+    parts.push(`P ${Number.isFinite(a.placementPressure) ? a.placementPressure.toExponential(2) : '?'}`);
+  } else {
+    parts.push(`head ${pct(a.headroom, 1)} of ${pct(a.threshold, 0)}`);
+    parts.push(adaptivePlan(a, paint));
+    parts.push(`conc ${num(a.concCap, 1)}`);
+  }
   const line = parts.join(paint.dim('  ·  '));
   return a.competing ? line : `${paint.dim('(not competing)')} ${line}`;
 }
