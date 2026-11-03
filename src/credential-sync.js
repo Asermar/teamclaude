@@ -107,7 +107,7 @@ export const TOMBSTONE_TTL_MS = 7 * 24 * 3600 * 1000;
  *   accountId?: string, userId?: string, organizationType?: string, rateLimitTier?: string, seatTier?: string,
  *   hasClaudeMax?: boolean|null, hasClaudePro?: boolean|null, accessToken: string, refreshToken: string,
  *   expiresAt: number, updatedAt: number, by: string }} Blob
- * @typedef {{ id: string, key: string, blob: Blob|null, deletedAt: number|null, updated: number }} Row
+ * @typedef {{ id: string, key: string, blob: Blob|null, deletedAt: number|null, moved: boolean, updated: number }} Row
  * @typedef {(method: string, path: string, params?: Record<string, any>|null, opts?: any) => Promise<any>} Api
  */
 
@@ -211,6 +211,19 @@ export function tombstoneOf(text) {
   if (!b || typeof b !== 'object' || b._deleted == null) return null;
   const at = typeof b._deleted === 'number' ? b._deleted : Date.parse(String(b._deleted));
   return Number.isFinite(at) ? at : null;
+}
+
+/**
+ * Fork-only (OkoTeamClaude): whether a row's contents are a tombstone that
+ * says the account was MOVED to another pool (`{"_deleted": …, "moved": true}`,
+ * written by claude-dist's pool move), not merely removed. The move renews the
+ * token before it writes the tombstone, so the refresh token any other install
+ * still holds for it is spent.
+ * @param {unknown} text
+ */
+export function movedOf(text) {
+  if (tombstoneOf(text) == null) return false;
+  return JSON.parse(/** @type {string} */ (text)).moved === true;
 }
 
 /** The row contents that say "removed", as of `now`. */
@@ -329,7 +342,7 @@ function keyFits(key, blob) {
 
 /** @param {any} r @returns {Row} */
 function rowOf(r) {
-  return { id: String(r.User_Credential__), key: String(r.Key), blob: decodeBlob(r.Data), deletedAt: tombstoneOf(r.Data), updated: Number(r?.Updated?.unixms) || 0 };
+  return { id: String(r.User_Credential__), key: String(r.Key), blob: decodeBlob(r.Data), deletedAt: tombstoneOf(r.Data), moved: movedOf(r.Data), updated: Number(r?.Updated?.unixms) || 0 };
 }
 
 export class CredentialSync {
@@ -861,6 +874,17 @@ export class CredentialSync {
         this.log(`[TeamClaude] Account "${name}": already renewed on ${safeLine(/** @type {Blob} */ (current.blob).by, 48)}; taking that token`);
         return tokensOf(/** @type {Blob} */ (current.blob));
       }
+      // Fork-only (OkoTeamClaude): moved to another pool, not just removed.
+      // Unlike a removal, the move renewed the token before writing the
+      // tombstone, so the refresh token this install holds is spent: sending it
+      // would be a reuse. Nothing is renewed (not even "this once", as for a
+      // removal); the pass that follows takes the account out.
+      if (current.deletedAt != null && current.moved) {
+        await this._unlock(row, leaseEnd);
+        this.log(`[TeamClaude] Account "${name}" was moved to another pool on another install, which spent its refresh token; not renewing it, removing it here`);
+        this.sync('tombstone').catch(() => {});
+        return this._standDown(account, force, 'it was moved to another pool', { lockHint: false });
+      }
       // Fork-only (OkoTeamClaude), and only when STORE_SENDING_MARK is set: the
       // store is told the renewal is about to go out, and it takes the mark only
       // while this install may renew (it still owns the account's pool). Refused,
@@ -989,16 +1013,20 @@ export class CredentialSync {
    * @param {Record<string, any>} account
    * @param {boolean} force
    * @param {string} why
+   * @param {{ lockHint?: boolean }} [opts]
    * @returns {null}
    */
-  _standDown(account, force, why) {
+  _standDown(account, force, why, { lockHint = true } = {}) {
     const name = safeLine(account.name, 64);
     if (!force && !isTokenExpired(account.expiresAt)) {
       this.log(`[TeamClaude] Account "${name}": not renewing, ${why}; keeping the current token`);
       return null;
     }
-    this.log(`[TeamClaude] Account "${name}": not renewing, ${why}; it waits for the lock (\`teamclaude callback logout\` renews without one)`);
-    throw Object.assign(new Error(`not renewed without the callback.net lock: ${why}`), { code: 'CALLBACK_LOCK_UNAVAILABLE' });
+    // lockHint (fork-only): off where the lock is not what is missing and
+    // renewing without it is no way out (a moved account's refresh token is
+    // spent), so neither the line nor the reason the client is told says so.
+    this.log(`[TeamClaude] Account "${name}": not renewing, ${why}${lockHint ? '; it waits for the lock (`teamclaude callback logout` renews without one)' : ''}`);
+    throw Object.assign(new Error(lockHint ? `not renewed without the callback.net lock: ${why}` : `not renewed: ${why}`), { code: 'CALLBACK_LOCK_UNAVAILABLE' });
   }
 
   /** Release the lock, unless the lease has run out: then it may be someone else's. */
