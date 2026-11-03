@@ -1029,9 +1029,10 @@ test('an account moved to another pool is not renewed over its tombstone: releas
   // Renewing without the lock would be the same reuse: the line does not offer it.
   assert.ok(!office.logs.some((l) => /callback logout/.test(l)), office.logs.join('\n'));
   assert.equal(account._lastRefreshFailure?.reason, 'not renewed: it was moved to another pool', 'what the client is told does not blame the lock');
-  await new Promise((r) => setImmediate(r));
-  await office.sync.sync(); // the pass the coordinator started, or this one — either removes it
+  // No pass of its own here: the one the coordinator started removes it.
+  await office.sync._syncing;
   assert.deepEqual(office.am.accounts, []);
+  assert.deepEqual(office.evicted, ['a']);
   assert.deepEqual(office.refreshed, []);
 });
 
