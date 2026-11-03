@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { CredentialSync, refreshOutsideProxy, syncKeyFor, isSyncable, encodeBlob, decodeBlob, entryFromBlob, needsSignIn, tombstoneOf, tombstone, KEY_PREFIX, TOMBSTONE_TTL_MS } from '../src/credential-sync.js';
+import { CredentialSync, refreshOutsideProxy, syncKeyFor, isSyncable, encodeBlob, decodeBlob, entryFromBlob, needsSignIn, tombstoneOf, tombstone, movedOf, KEY_PREFIX, TOMBSTONE_TTL_MS } from '../src/credential-sync.js';
 
 // Credential sync through callback.net: every signed-in install keeps its OAuth
 // account tokens in the user's credential store and follows it. The store here
@@ -993,6 +993,80 @@ test('a removed account is renewed under the lock, then released', async () => {
   const fns = store.calls.filter((c) => c.path.includes(row.User_Credential__)).map((c) => `${c.method} ${c.path.split(':')[1] || ''}`);
   const lockAt = fns.lastIndexOf('POST lock');
   assert.ok(lockAt >= 0 && fns.slice(lockAt + 1).includes('POST unlock'), fns.join(', '));
+});
+
+// Fork-only (OkoTeamClaude): claude-dist's pool move renews the token, then
+// leaves a tombstone saying "moved". The refresh token any other install still
+// holds is spent, so a renewal over that tombstone would present it again.
+const movedTombstone = (at) => ({ ...tombstone(at), moved: true });
+
+test('a moved-tombstone is a tombstone like any other; only `moved: true` makes it one that was moved', () => {
+  const at = T0 + H;
+  assert.equal(tombstoneOf(JSON.stringify(movedTombstone(at))), at);
+  assert.equal(movedOf(JSON.stringify(movedTombstone(at))), true);
+  assert.equal(movedOf(JSON.stringify(tombstone(at))), false);
+  assert.equal(movedOf(JSON.stringify({ ...tombstone(at), moved: 'yes' })), false);
+  assert.equal(movedOf(JSON.stringify({ moved: true })), false, 'not a tombstone');
+  assert.equal(movedOf('not json'), false);
+  assert.equal(movedOf(null), false);
+});
+
+test('an account moved to another pool is not renewed over its tombstone: released, nothing sent, removed at the pass', async () => {
+  // The install had not synced since the move (S1a; and H2, its pass missed).
+  const store = makeStore();
+  const office = setup([claude('a')], { store });
+  await office.sync.sync();
+  const row = store.byKey(syncKeyFor(claude('a')));
+  row.Data = JSON.stringify(movedTombstone(store.now()));
+  const account = office.am.accounts[0];
+
+  await office.am.ensureTokenFresh(0, true);
+  assert.deepEqual(office.refreshed, [], 'the spent refresh token was not presented');
+  assert.equal(row.Locked, null, 'released');
+  assert.deepEqual(JSON.parse(row.Data), movedTombstone(store.now()), 'the tombstone is left as it is');
+  assert.ok(office.logs.some((l) => /"a" was moved to another pool on another install, which spent its refresh token; not renewing it, removing it here/.test(l)), office.logs.join('\n'));
+  assert.ok(office.logs.some((l) => /"a": not renewing, it was moved to another pool$/.test(l)), office.logs.join('\n'));
+  // Renewing without the lock would be the same reuse: the line does not offer it.
+  assert.ok(!office.logs.some((l) => /callback logout/.test(l)), office.logs.join('\n'));
+  assert.equal(account._lastRefreshFailure?.reason, 'not renewed: it was moved to another pool', 'what the client is told does not blame the lock');
+  await new Promise((r) => setImmediate(r));
+  await office.sync.sync(); // the pass the coordinator started, or this one — either removes it
+  assert.deepEqual(office.am.accounts, []);
+  assert.deepEqual(office.refreshed, []);
+});
+
+test('an account moved while its token still works keeps that token, renews nothing', async () => {
+  const soon = Date.now() + 2 * 60_000;
+  const store = makeStore();
+  const office = setup([claude('a', { expiresAt: soon })], { store });
+  await office.sync.sync();
+  store.byKey(syncKeyFor(claude('a'))).Data = JSON.stringify(movedTombstone(store.now()));
+  await office.am.ensureTokenFresh(0);
+  assert.deepEqual(office.refreshed, []);
+  assert.ok(office.logs.some((l) => /"a": not renewing, it was moved to another pool; keeping the current token/.test(l)), office.logs.join('\n'));
+});
+
+test('an account moved while this install waited on the lock is not renewed once the lock is had', async () => {
+  // S1c: another install holds the lock (the move) and leaves the tombstone.
+  const { sync, am, store, refreshed, sleeps, logs } = setup([claude('a')]);
+  await sync.sync();
+  const row = store.byKey(syncKeyFor(am.accounts[0]));
+  row.Locked = { unixms: String(store.now()) };
+  row.Data = JSON.stringify(movedTombstone(store.now()));
+  await am.ensureTokenFresh(0, true);
+  assert.equal(sleeps.filter((ms) => ms === 5000).length >= 6, true, String(sleeps));
+  assert.deepEqual(refreshed, []);
+  assert.ok(logs.some((l) => /"a" was moved to another pool on another install/.test(l)), logs.join('\n'));
+});
+
+test('a plain removal still renews this once, even when its tombstone carries some other field', async () => {
+  const store = makeStore();
+  const office = setup([claude('a')], { store });
+  await office.sync.sync();
+  store.byKey(syncKeyFor(claude('a'))).Data = JSON.stringify({ ...tombstone(store.now()), other: 1 });
+  await office.am.ensureTokenFresh(0, true);
+  assert.deepEqual(office.refreshed, ['rt-a-1']);
+  assert.ok(office.logs.some((l) => /"a" was removed on another install; renewed this once, removing it here/.test(l)), office.logs.join('\n'));
 });
 
 test('a row gone between its read and its lock is found again, and locked', async () => {
