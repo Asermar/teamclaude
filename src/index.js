@@ -10,7 +10,7 @@ import { loadQuotaSeries, saveQuotaSeries } from './quota-series.js';
 import { installCrashHandlers } from './crash-log.js';
 import { AccountManager, distributionMode, accountRouting } from './account-manager.js';
 import { validateAdaptiveConfig } from './adaptive-distribution.js';
-import { createProxyServer, reloadedHeaderFlags } from './server.js';
+import { createProxyServer, reloadedHeaderFlags, resolveAccountPin } from './server.js';
 import { createDrainState, resolveDrainTimeoutSeconds } from './drain.js';
 import { importCredentials, loginOAuth, loginOAuthWithPastedCode, startOAuthLogin, fetchProfile, profileForCredentials, refreshAccessToken, isTokenExpired, isTokenExpiringSoon } from './oauth.js';
 import {
@@ -26,13 +26,14 @@ import {
 import { resolveAccounts } from './resolve-accounts.js';
 import { loginCodex, startCodexLogin } from './codex-auth.js';
 import { isRemoteSession, openBrowser, PANEL_LOGIN_TIMEOUT_MS } from './login-flow.js';
-import { providerOf } from './provider.js';
+import { providerOf, canServeProvider } from './provider.js';
 import { syncAccountsFromDisk } from './sync-accounts.js';
 import { mergeAccountsForSave, syncRefreshedTokens, removedAccountIds, clearRemovedAccountIds, clearAddedAccountIds, markAccountRemoved, configIndexFor } from './account-pairing.js';
 import { ensureAccountIds, accountIdsComplete } from './account-id.js';
 import * as alias from './alias.js';
 import { ensureCerts, mitmHosts, caCertPath } from './mitm.js';
 import { Prober, probeApplicable } from './prober.js';
+import { CreditMonitor } from './api-credit.js';
 import { ResetCreditRedeemer } from './codex-reset-credits.js';
 import { ClaudeResetRedeemer } from './claude-resets.js';
 import { Warmer, warmApplicable } from './warmer.js';
@@ -46,6 +47,7 @@ import { autoUpdate, checkForUpdate, currentVersion, resolveVersionLabel, runUpd
 import { renderStatus, formatPercent } from './status-renderer.js';
 import { sanitizeText, safeLine } from './safe-text.js';
 import { modelLabel } from './model.js';
+import { cacheUsageLabel } from './usage-label.js';
 import { ClientUsageTracker, UsageDimensionTracker } from './client-usage.js';
 import { buildClaudeEnvLines, bypassesAllHosts, clearSelfProxyEnvLines, encodePinComponent, LOCAL_LOGIN_HINT_WINDOW_MS, localLoginHint, mergeNoProxy, resolveClientMode } from './claude-env.js';
 import { serviceKind, installService, uninstallService, serviceStatus, renderService, logPath } from './service.js';
@@ -119,6 +121,7 @@ import {
   thresholdTable,
   upsertRoute,
   setAccountDisabled,
+  setAccountCordoned,
   setAccountPriority,
   renameAccount,
 } from './config-ops.js';
@@ -234,6 +237,18 @@ switch (command) {
     break;
   case 'enable':
     await setDisabledCommand(false);
+    process.exit(0);
+    break;
+  case 'cordon':
+    await setCordonedCommand(true);
+    process.exit(0);
+    break;
+  case 'uncordon':
+    await setCordonedCommand(false);
+    process.exit(0);
+    break;
+  case 'release':
+    await releaseCommand();
     process.exit(0);
     break;
   case 'api':
@@ -390,7 +405,7 @@ async function serverCommand() {
     console.error(`[TeamClaude] Bad adaptiveDistribution setting in ${getConfigPath()}: ${err.message}`);
     process.exit(1);
   }
-  const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, expiryRouting: config.expiryRouting, advisorEligibility: config.advisorEligibility, adaptive, listener: localListener(config) });
+  const accountManager = new AccountManager(accounts, threshold, { routes: config.routes, ramp: config.stormRamp, distributeSessions: config.distributeSessions, expiryRouting: config.expiryRouting, preferSoonestWeeklyReset: config.preferSoonestWeeklyReset, advisorEligibility: config.advisorEligibility, adaptive, listener: localListener(config) });
   // Names the activity log's session column from Claude Code's own on-disk
   // session titles. Built whether or not the TUI runs, so a reload has one
   // object to reconfigure.
@@ -536,6 +551,10 @@ async function serverCommand() {
 
   // Opt-in background quota probe (config.quotaProbeSeconds, default 0 = off).
   let prober = null;
+  // The prepaid-credit cost-report reader: reads only accounts that carry
+  // `credit.adminKey`, and nothing at all when none does.
+  /** @type {CreditMonitor|null} */
+  let creditMonitor = null;
   // Opt-in keep-warm scheduler (interval or persisted reset-target schedule).
   let warmer = null;
   const serverStartedAt = Date.now();
@@ -624,6 +643,8 @@ async function serverCommand() {
     // Pick up expiry-routing edits the same way, so the knob hot-applies.
     config.expiryRouting = diskConfig.expiryRouting;
     accountManager.setExpiryRouting(config.expiryRouting);
+    config.preferSoonestWeeklyReset = diskConfig.preferSoonestWeeklyReset;
+    accountManager.setPreferSoonestWeeklyReset(config.preferSoonestWeeklyReset);
     // And the advisor mode: read off the manager on every selection, so the
     // setter is the whole application. Absent on disk means 'strict' again.
     config.advisorEligibility = diskConfig.advisorEligibility;
@@ -852,7 +873,8 @@ async function serverCommand() {
       // when it ended on none at all.
       const from = [...(r?.retriedFrom ?? []), ...(r?.account && r.account !== acct ? [r.account] : [])];
       const retry = from.length ? ` [retry from ${from.join(', ')}]` : '';
-      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${retry}${pin} (${info.status}, ${dur}s)`);
+      const cache = cacheUsageLabel(info.cacheUsage);
+      writeActivity(`${client}${sid}${info.method} ${info.path}${model} → ${acct}${retry}${pin} (${info.status}, ${dur}s)${cache ? ` ${cache}` : ''}`);
     };
     if (!toStdout) {
       // Tee console output to the activity log as well
@@ -884,6 +906,14 @@ async function serverCommand() {
     /** @type {{ name: string, disabled: boolean }|undefined} */
     let result;
     await atomicConfigUpdate((/** @type {any} */ diskConfig) => { result = setAccountDisabled(diskConfig, account, disabled, spec); });
+    return result;
+  };
+  // POST /teamclaude/account-cordon, the same way: no new conversation goes to
+  // a cordoned account, while one already on it keeps being served there.
+  hooks.setAccountCordoned = async (/** @type {string} */ account, /** @type {boolean} */ cordoned, /** @type {any} */ spec) => {
+    /** @type {{ name: string, cordoned: boolean }|undefined} */
+    let result;
+    await atomicConfigUpdate((/** @type {any} */ diskConfig) => { result = setAccountCordoned(diskConfig, account, cordoned, spec); });
     return result;
   };
 
@@ -1058,6 +1088,14 @@ async function serverCommand() {
     console.error('[TeamClaude] accounts[].maxSpend is set but the quota probe is off (quotaProbeSeconds = 0) — the spend figure it is judged against is only refreshed by the probe, so the cap only binds after a manual `p` refresh; run `teamclaude probe <seconds>`');
   }
 
+  // Read each account's organization spend for `accounts[].credit` when it
+  // carries an Admin API key (api-credit.js). Opt-in by the key's presence,
+  // zero-spend, and disabled accounts included: it sends no message and
+  // refreshes no token. The check is a minute's tick over the account list;
+  // each account is read on its own `refreshMinutes`.
+  creditMonitor = new CreditMonitor(accountManager);
+  creditMonitor.start();
+
   // Start the opt-in keep-warm scheduler. Interval mode runs relative to server
   // startup; reset-target modes restore their next occurrence from config.
   warmer = new Warmer(accountManager, {
@@ -1094,6 +1132,7 @@ async function serverCommand() {
     stopTitle();
     if (!tui) console.log('\n[TeamClaude] Shutting down...');
     prober?.stop();
+    creditMonitor?.stop();
     warmer?.stop();
     credentialSync.stop();
     eventLoopMonitor.stop();
@@ -1583,8 +1622,12 @@ async function envCommand() {
     process.stderr.write(`# pinned to account "${account}" (TC_ACCT)\n`);
     // Warn, don't fail: the account list can change before the shell is used,
     // and this command must stay eval-safe.
-    if (!(config.accounts || []).some((a, i) => a.name === account || String(i) === account)) {
+    // A comma list (a, b, c) is checked name by name, as the proxy resolves it.
+    const known = (/** @type {string} */ t) => (config.accounts || []).some((/** @type {any} */ a, /** @type {number} */ i) => a.name === t || String(i) === t);
+    if (!known(account) && !account.split(',').every(known)) {
       process.stderr.write(`# warning: no account named "${account}" in the config — the proxy will refuse this pin\n`);
+    } else if (config.accounts?.[resolveAccountPin({ accounts: config.accounts }, account) ?? -1]?.cordoned) {
+      process.stderr.write(`# warning: account "${account}" is cordoned — it takes no new conversations (teamclaude uncordon ${account} puts it back)\n`);
     }
   }
   // The flag that reproduces this mode whatever the config's default says.
@@ -1638,6 +1681,15 @@ async function runCommand() {
   // gets inherited by every tool and MCP server claude spawns.
   const tcAcct = (process.env.TC_ACCT || '').trim();
   delete env.TC_ACCT;
+  // A pinned launch is a new conversation on that account, which a cordoned
+  // account takes none of: refused here, where it would start, while the
+  // sessions already pinned to it keep being served by the proxy.
+  // Resolved the way the proxy resolves the pin, so every spelling it takes
+  // (name, email, uuid) is caught here.
+  if (tcAcct && config.accounts?.[resolveAccountPin({ accounts: config.accounts }, tcAcct) ?? -1]?.cordoned) {
+    console.error(`[TeamClaude] Account "${tcAcct}" is cordoned: it takes no new conversations. Pin another account, or run without TC_ACCT, or put it back with: teamclaude uncordon ${tcAcct}`);
+    process.exit(1);
+  }
   // Legacy: a caller-supplied ANTHROPIC_BASE_URL of http://<this proxy>/tc-acct/…
   // also pins (shipped in 1.1.10). TC_ACCT is the supported way now — it works in
   // MITM mode too, and keeps the pin out of the API path.
@@ -2832,6 +2884,94 @@ async function setDisabledCommand(disabled) {
   await notifyRunningServer(config);
 }
 
+// ── cordon / uncordon ─────────────────────────────────────────
+
+/**
+ * `teamclaude cordon <name>` / `uncordon <name>`: a cordoned account takes no
+ * new conversation, while one already on it keeps being served there until it
+ * finishes; the step before disabling or removing it. Written the way enable
+ * and disable are, then picked up by a running server's reload.
+ * @param {boolean} cordoned
+ */
+async function setCordonedCommand(cordoned) {
+  const config = await loadOrCreateConfig();
+  const name = args[1];
+  const verb = cordoned ? 'cordon' : 'uncordon';
+
+  if (!name) {
+    console.error(`Usage: teamclaude ${verb} <account-name|email> [--org <name|uuid>]`);
+    process.exit(1);
+  }
+
+  const account = resolveAccount(config.accounts, name, argValue('--org'));
+  if (!account) {
+    console.error(`Account "${name}" not found`);
+    process.exit(1);
+  }
+
+  if (cordoned) {
+    account.cordoned = true;
+  } else {
+    delete account.cordoned;
+  }
+  await saveConfig(config);
+  console.log(cordoned
+    ? `Cordoned account "${account.name}": no new conversations go to it; the ones already on it stay until they finish (teamclaude status shows how many are left)`
+    : `Uncordoned account "${account.name}": it takes new conversations again`);
+  await notifyRunningServer(config);
+  // Every other account that could take its traffic is disabled or cordoned
+  // too: say so now, rather than leave it to the next request's refusal.
+  const provider = providerOf(account);
+  if (cordoned && !(config.accounts || []).some((/** @type {any} */ a) => a !== account && !a.disabled && !a.cordoned && canServeProvider(a, provider))) {
+    console.log(`No other account takes new ${provider} conversations now: they are refused until one is uncordoned, enabled or added.`);
+  }
+}
+
+// ── release ─────────────────────────────────────────────────
+
+/**
+ * `teamclaude release <name>`: place the conversations pinned to an account
+ * again on their next request, leaving the account in service (#643). Pins live
+ * in the running server, so it is the only place that can apply this.
+ */
+async function releaseCommand() {
+  const config = await loadOrCreateConfig();
+  const port = config.proxy.port;
+  const name = args[1] && !args[1].startsWith('-') ? args[1] : null;
+  if (!name) {
+    console.error('Usage: teamclaude release <account-name|email>');
+    process.exit(1);
+  }
+  try {
+    const res = await fetch(`http://localhost:${port}/teamclaude/account-release`, {
+      method: 'POST',
+      headers: { 'x-api-key': config.proxy.apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // As in switchCommand: only our own errors are strings.
+      const detail = typeof data.error === 'string' ? data.error : null;
+      console.error(detail || `Release failed: unexpected reply from localhost:${port} (HTTP ${res.status}).`);
+      if (!detail) console.error('An older server without this endpoint answers this way; restart it to pick up the new version.');
+      if (data.accounts?.length) {
+        console.error('Known accounts:');
+        for (const n of data.accounts) console.error(`  ${n}`);
+      }
+      process.exit(1);
+    }
+    console.log(`Released ${data.released} conversation${data.released === 1 ? '' : 's'} pinned to "${data.account}": each is placed again on its next request`);
+    if (data.stillCurrent) {
+      console.log(`Session distribution is off and "${data.account}" is the current account, so traffic stays on it until you run: teamclaude switch <other>`);
+    }
+  } catch (/** @type {any} */ err) {
+    console.error('Cannot connect to proxy at localhost:' + port);
+    console.error('Is the server running? Start with: teamclaude server');
+    if (err?.message) console.error(`Details: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 // ── routing ─────────────────────────────────────────────────
 
 async function routingCommand() {
@@ -2950,6 +3090,10 @@ Commands:
   remove <name>       Remove an account (by name or email; --org to disambiguate)
   disable <name>      Temporarily exclude an account from rotation
   enable <name>       Re-enable a disabled account (also clears a stuck error)
+  cordon <name>        Send no new conversations to an account; the ones already
+                      on it stay there until they finish (uncordon <name> to end)
+  release <name>      Unpin the conversations on an account, leaving it in service;
+                      each is placed again on its next request
   priority <name> <n> Set rotation priority (lower = preferred; --first/--last)
   rename <name> <new> Rename an account, updating the routes that list it
   route [list|add|rm] Per-model routing: pin model globs to specific accounts
@@ -3015,6 +3159,8 @@ Environment:
                       both modes. Accepts accountUuid, orgUuid,
                       accountUuid/orgUuid, or a display name/email:
                         TC_ACCT=me@example.com teamclaude run
+                      A comma list of API-key accounts (TC_ACCT=a,b,c) moves
+                      along the list when billing refuses the current one.
                       Prefer a UUID for anything scripted: display names are
                       rewritten when an email gains a second org. Read by 'run'
                       and 'env', then removed from the environment so it never

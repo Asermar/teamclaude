@@ -206,3 +206,33 @@ test('a session pinned by hand to an outranked account does not split on the out
     proxy.close();
   }
 });
+
+// The control endpoint leaves a line for each account change it makes; the
+// cordon (#647) is the third, beside priority and enable/disable.
+for (const [path, body, expected] of [
+  ['/teamclaude/account-cordon', { cordoned: true }, 'Cordoned account'],
+  ['/teamclaude/disable', { disabled: true }, 'Disabled account'],
+  ['/teamclaude/priority', { priority: 3 }, 'Set priority of'],
+]) {
+  test(`the control endpoint's "${expected}" line does not split on an account name`, async () => {
+    const name = `first\n${MARK} a`;
+    const am = new AccountManager([{ name, type: 'apikey', apiKey: 'k1' }, { name: 'second', type: 'apikey', apiKey: 'k2' }], 0.98);
+    const hook = async (/** @type {string} */ account, /** @type {any} */ value) => ({ name: account, cordoned: value, disabled: value, priority: value?.priority });
+    const hooks = { setAccountCordoned: hook, setAccountDisabled: hook, setAccountPriority: hook, reload: async () => 0 };
+    const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: 'http://127.0.0.1:9' }, hooks);
+    const port = await listen(proxy);
+    try {
+      const lines = await captured(async () => {
+        const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': 'k' },
+          body: JSON.stringify({ account: name, ...body }),
+        });
+        assert.equal(res.status, 200, await res.text());
+      });
+      assertNotSplit(lines, expected);
+    } finally {
+      proxy.close();
+    }
+  });
+}

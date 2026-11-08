@@ -110,6 +110,8 @@ test('a request that changed account says which one served it and where it came 
     const [line] = await requestLines(server, 1);
     assert.ok(line, server.output());
     assert.match(line, /→ second \[retry from first\] \(200, /, line);
+    // Upstream's cache figures (#653) still close the line after the retry.
+    assert.match(line, /\[retry from first\] \(200, [\d.]+s\) cache r\S+ w\S+ in\S+/, line);
   });
 });
 
