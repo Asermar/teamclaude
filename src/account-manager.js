@@ -4842,12 +4842,6 @@ export class AccountManager {
   _nearQuotaBucket(account, model = null) {
     const q = account.quota;
     this._clearExpiredQuotas(account);
-    const over = (/** @type {string} */ bucket, /** @type {number} */ used) => {
-      const threshold = this.thresholdFor(bucket, account);
-      return used >= threshold ? { bucket, used, threshold } : null;
-    };
-    /** @type {{ bucket: string, used: number, threshold: number }|null} */
-    let reason;
 
     // Shared 5-hour bucket gates every request regardless of model.
     if (q.unified5h != null && q.unified5h >= this.thresholdFor('unified5h', account)) return 'unified5h';
